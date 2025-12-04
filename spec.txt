@@ -1,0 +1,606 @@
+Abstract State Machine Language Specification
+==============================================
+
+This document specifies an imperative programming language with a binary
+integer data model and an explicit small-step execution semantics. A program
+is compiled into an initial machine state (a seed configuration) and then
+executed solely by repeatedly applying a fixed, program-independent
+state-transition (rewrite) function. All intermediate states are
+(semi-)human-readable and serializable, and execution can be traced and replayed
+exactly, including I/O and nondeterministic choices, which are modeled
+explicitly for deterministic replay.
+
+Note: Builds should not refer to this language by any proper name,
+as none has been specified yet. If a name is needed
+(e.g. for a filename), use ASM-Lang (Abstract State Machine Language) as a
+placeholder.
+
+
+1. Overview
+-----------
+
+The language is a familiar statement-based, imperative language. Programs
+consist of variable declarations via assignment, expressions, and
+control-flow constructs such as 'IF', 'ELSIF', 'ELSE', 'WHILE', and 'FOR'.
+All data values are (conceptually unbounded) binary integers, interpreted as
+either signed or unsigned according to the implementation. Computation
+proceeds by evaluating expressions and executing statements in sequence, with
+explicit constructs for branching and looping. Input and output are modeled
+through built-in operators, in particular 'INPUT' and 'PRINT'.
+
+The interpreter compiles source code into a single initial configuration (the
+seed state), which includes the program code, an empty variable environment,
+and an initial I/O history. It then advances execution by repeatedly applying
+a single, fixed small-step transition function that is independent of the
+particular program. A disassembler and log view expose all intermediate
+states so that every step and every control-flow decision is inspectable and
+replay-able.
+
+
+2. Lexical Structure
+--------------------
+
+Source files are sequences of ASCII characters. Non-ASCII characters are not
+permitted in syntactic elements that enter the program namespace, such as
+identifiers.
+
+Whitespace consists of the space character ('U+0020'), horizontal tab,
+carriage return, and line feed. It may appear freely between tokens and is
+otherwise ignored, except that newlines delimit top-level statements (see
+Section 5.1).
+
+A comment begins with the '#' character and continues to the end of the
+current line. Comments have no effect on execution.
+
+The program text is divided into several token kinds: binary integer
+literals (Section 3.1); identifiers for variable names and user-defined
+function names (Section 2.5); keywords and built-ins (control-flow
+keywords, built-in operators and functions; see Sections 4 and 5); and
+delimiters, namely '(', ')', '[', ']', '{', '}', ',', and '='.
+
+Identifiers denote variables and user-defined functions. They must be
+non-empty and case-sensitive. An identifier must not contain non-ASCII
+characters, nor any of the following characters: '{', '}', '[', ']', '(',
+')', '0', '1', '=', ',', '#'. The namespace is flat: variables and
+functions share a single identifier space, so a given name cannot
+simultaneously denote both. A user-defined function name must not conflict
+with the name of any built-in operator or function (see Section 4.1).
+
+
+3. Data Model
+-------------
+
+The sole literal data type is the binary integer. A binary integer literal is
+a non-empty sequence of characters drawn from the set '{0,1}' (for example,
+'0', '1', '1011', '100110'). There is no syntactic sign ('+' or '-') for
+literals; sign, if modeled, is an implementation detail (such as two’s
+complement) and does not affect the syntax.
+
+Every runtime value is a mathematical integer. The language does not support
+fractional or real-valued numbers. All operations that would otherwise
+produce non-integer results, such as division, are defined with explicit
+rounding behavior (see Section 4.2).
+
+
+4. Expressions and Operators
+----------------------------
+
+All operators and functions, both built-in and user-defined, share a uniform
+function-call style syntax of the form 'NAME(arg1, arg2, ..., argN)'. The
+argument list may be empty for certain functions such as 'INPUT'. Arguments
+are separated by commas, and spaces may appear around commas and inside
+parentheses without changing meaning. Each operator has either a fixed or a
+variable arity as described below.
+
+All built-ins operate on integer values and, unless explicitly stated
+otherwise, return an integer result. The language has no separate Boolean
+type; instead, integers are interpreted as Boolean values in conditional or
+logical contexts, with '0' representing false and any non-zero value
+representing true. Boolean operators always return '0' or '1'. Unless
+explicitly noted, any multi-argument operator requires at least one
+argument.
+
+Logical operators 'AND(a, b)', 'OR(a, b)', 'XOR(a, b)', and 'NOT(a)' operate
+on the Boolean interpretation of their integer arguments. 'AND' returns '1'
+only if both arguments are non-zero, 'OR' returns '1' if at least one is
+non-zero, and 'XOR' returns '1' if exactly one is non-zero. 'NOT' returns '1'
+if its argument is '0'; otherwise it returns '0'.
+
+Bitwise operators act on the binary representation of integers. 'BAND(a, b)'
+computes a bitwise AND, 'BOR(a, b)' a bitwise OR, 'BXOR(a, b)' a bitwise XOR,
+and 'BNOT(a)' the bitwise complement. The interpretation of sign and bit
+width for these operations is implementation-defined but must be consistent
+across all bitwise operators.
+
+Arithmetic operators include 'ADD(a, b)' for integer addition, 'SUB(a, b)'
+for subtraction ('a - b'), and 'MUL(a, b)' for multiplication. 'DIV(a, b)'
+performs integer division with floor rounding, returning '⌊a / b⌋'; division
+by zero is implementation-defined but should raise a runtime error.
+'CEIL(a, b)' performs integer division with ceiling rounding, returning
+'⌈a / b⌉' and similarly treating division by zero as an error.
+'POW(a, b)' computes integer exponentiation 'a^b' for integer exponents
+'b ≥ 0'; behavior for negative exponents is undefined or
+implementation-defined. The modulus operator 'MOD(a, b)' returns the
+remainder of dividing 'a' by 'b', typically chosen so that
+'0 ≤ result < |b|', with the exact convention fixed by the implementation.
+
+The unary operator 'NEG(a)' returns the additive inverse of 'a' (that is,
+the value '-a'). The unary operator 'ABS(a)' returns the absolute value of
+'a' (that is, 'a' if 'a ≥ 0' and '-a' otherwise).
+
+The arithmetic library also provides functions for common number-theoretic
+operations. 'GCD(a, b)' returns the greatest common divisor of 'a' and 'b'
+for integer arguments, with the convention that 'GCD(0, 0)' is
+implementation-defined (commonly 0). 'LCM(a, b)' returns the least common
+multiple of 'a' and 'b' for integer arguments; if either argument is 0 the
+result is typically 0, with exact behavior left to the implementation.
+
+Finally, 'PROD(a1, a2, ..., aN)' computes the integer product of its
+arguments (for 'N ≥ 1'); if any argument is '0' the result is '0'.
+
+Several operators aggregate multiple arguments. 'MAX(a1, ..., aN)' and 'MIN(a1, ..., aN)'
+return, respectively, the larger and smaller of their two arguments.
+'ALL(a1, ..., an)' performs a Boolean AND over any number of arguments
+'n ≥ 1', returning '1' if all are non-zero and '0' otherwise; 'ANY(a1,
+..., an)' performs a Boolean OR over any number of arguments, returning '1'
+if at least one is non-zero and '0' otherwise. 'SUM(a1, a2, ..., an)'
+computes the integer sum of its arguments. 'LEN(a1, a2, ..., an)' returns the
+number of arguments supplied, that is, 'n'.
+
+Logarithmic operators are defined in base 2. 'LOG(a)' returns the floor of
+the base-2 logarithm: for 'a > 0', it is the greatest integer 'k' such that
+'2^k ≤ a'. 'CLOG(a)' returns the ceiling of the base-2 logarithm: for
+'a > 0', it is the smallest integer 'k' such that '2^k ≥ a'. For 'a ≤ 0',
+both 'LOG' and 'CLOG' have implementation-defined behavior and should raise
+a runtime error.
+
+Comparison operators return '1' if the comparison holds and '0' otherwise.
+'EQ(a, b)' tests equality, while 'GT(a, b)' and 'LT(a, b)' test strict
+greater-than and strict less-than, respectively. 'GTE(a, b)' tests
+greater-than-or-equal and 'LTE(a, b)' tests less-than-or-equal.
+
+Input, output, and assertions are expressed through dedicated operators.
+'PRINT(a1, a2, ..., an)' outputs its arguments to the console in an
+implementation-defined textual format. It is typically used in statement
+position, and any return value is discarded. The effect on the external
+world is recorded in the execution log, ensuring that replay remains
+deterministic.
+
+'INPUT()' (or simply 'INPUT' in expression position) reads a value from the
+console or input stream. If the incoming text is empty, the result is '0'.
+If the text consists solely of the characters '0' and '1', it is interpreted
+as the corresponding binary integer. Any other non-empty text yields the
+result '1'. All I/O events, including inputs, are recorded in the execution
+log for deterministic replay.
+
+'ASSERT(a)' checks that its argument is true in the Boolean sense. If 'a' is
+non-zero, execution proceeds normally; if 'a' is '0', the program crashes
+with an assertion failure.
+
+Memory-management and function-return behavior are also exposed via
+operators. 'DEL(x)' deletes the variable 'x' from the current environment,
+freeing its memory; any subsequent reference to 'x' is an error unless 'x'
+is re-assigned. 'RETURN(a)', when executed inside a function body,
+immediately terminates that function and returns the value of 'a' to the
+caller. Executing 'RETURN' outside of a function is a runtime error.
+
+
+5. Statements and Control Flow
+------------------------------
+
+A program consists of zero or more statements separated by newlines. Each
+top-level expression or assignment must appear on its own line. The basic
+statement forms are assignments of the form 'identifier = expression',
+expression statements such as calls to 'PRINT' whose result is ignored,
+control-flow constructs ('IF', 'ELSIF', 'ELSE', 'WHILE', and 'FOR'), and
+function definitions ('FUNC' declarations; see Section 6).
+
+Blocks group one or more statements and are enclosed in either square or
+curly brackets: '[ statement1 ... statementN ]' or
+'{ statement1 ... statementN }'. The two bracket styles are equivalent but
+must match (that is, '[' closes with ']' and '{' closes with '}'). Blocks
+serve as the bodies of control-flow constructs and functions.
+
+Assignments have the syntax 'identifier = expression', with spaces around the
+equals sign being optional. If the identifier does not yet exist, the
+assignment creates it and assigns memory; if it already exists, its stored
+value is overwritten. Variables are deallocated only when 'DEL(identifier)'
+is executed.
+
+The language provides 'IF', 'ELSIF', and 'ELSE' constructs for conditional
+execution. An 'IF' statement has the general form 'IF(condition)[ block ]' or
+'IF(condition){ block }'. Optional chained branches may follow: one or more
+'ELSIF(condition)[ block ]' or 'ELSIF(condition){ block }' clauses and an
+optional terminal 'ELSE[ block ]' or 'ELSE{ block }' clause. An 'ELSIF' or
+'ELSE' must immediately follow an 'IF' or another 'ELSIF'; otherwise it is a
+syntax error. At most one 'ELSE' may appear in a given chain. Evaluation
+proceeds by first evaluating the condition of the initial 'IF'. If it is
+non-zero, the associated block executes and the rest of the chain is
+skipped. Otherwise, the conditions of subsequent 'ELSIF' clauses are
+evaluated in order until one is non-zero; its block then executes and the
+chain terminates. If no 'IF' or 'ELSIF' condition is satisfied and an
+'ELSE' is present, the 'ELSE' block executes; if there is no 'ELSE', no block
+in the chain executes.
+
+Loops are provided via 'WHILE' and 'FOR'. A 'WHILE' loop has the form
+'WHILE(condition)[ block ]' or 'WHILE(condition){ block }'. On each
+iteration, the condition is evaluated; if it is non-zero, the block executes
+and control returns to the start of the loop to evaluate the condition
+again. If the condition evaluates to zero, the loop terminates and execution
+continues with the next statement.
+
+The 'FOR' construct has the form 'FOR(counter, target)[ block ]' or
+'FOR(counter, target){ block }', where 'counter' is an identifier and
+'target' is an expression. At loop entry, 'target' is evaluated once to a
+value 'T', and 'counter' is initialized to '0', creating it if necessary.
+The loop then repeats: if the current value of 'counter' is greater than or
+equal to 'T', the loop exits; otherwise, the block executes and 'counter' is
+incremented by '1' before the next iteration.
+
+
+6. Functions
+------------
+
+Functions are defined using the 'FUNC' keyword. The canonical form is
+'FUNC name(arg1, arg2, ..., argN)[ block ]' or
+'FUNC name(arg1, arg2, ..., argN){ block }', where 'name' is an identifier
+and each 'argK' is an identifier. Defining a function binds 'name' to a
+callable body with the specified formal parameters. As noted earlier,
+function names must not conflict with the names of built-in operators or
+functions.
+
+A user-defined function is called with the same syntax as a built-in:
+'name(expr1, expr2, ..., exprN)'. The arguments are evaluated
+left-to-right, producing values that are then bound to the function’s formal
+parameters in a new environment (activation record). The function body block
+executes in this environment, which may or may not have access to
+surrounding or global variables depending on the chosen scoping model
+(static or dynamic, to be fixed by the implementation). If a 'RETURN(v)'
+statement is executed within the body, the function terminates immediately
+and yields 'v' as its result. If control reaches the end of the body without
+encountering 'RETURN', the function’s return value is
+implementation-defined, commonly taken to be '0'.
+
+Built-in operators and functions can be viewed as pre-defined functions
+provided by the runtime environment. User-defined functions share the same
+call syntax and are distinguished only by their names and bodies. Because of
+the shared namespace, a user-defined function is not permitted to use any
+name already reserved for a built-in. Attempting to violate this will raise an exception.
+
+
+7. Variables and Memory Model
+-----------------------------
+
+A variable is created automatically upon first assignment, for example in
+'foo = 1101'. It exists until 'DEL(foo)' is executed, at which point its
+storage is freed and its name is removed from the environment. Referencing a
+variable that has never been assigned, or that has been deleted, is a
+runtime error.
+
+The language assumes at least a global environment mapping identifiers to
+integer values. Function calls create new environments for parameters and
+local variables, as described in Section 6.2; the precise details of name
+resolution depend on the chosen scoping rules.
+
+
+8. Execution Model and Semantics
+--------------------------------
+
+The interpreter compiles the source program into an initial machine state,
+called the seed configuration. This configuration contains at least the
+parsed (and possibly transformed) program representation, the initial
+variable environments such as an empty global environment, and an explicit
+model of I/O and nondeterministic inputs, initially empty.
+
+Execution is driven by a single, fixed, program-independent small-step
+state-transition function 'step'. At each step, 'step' takes the current
+state and produces the next one, encompassing expression evaluation,
+statement execution, function call and return, and I/O events.
+
+Every state produced during execution is serializable and human-readable.
+The interpreter maintains a disassembler and log that record the sequence of
+states visited, the program locations and conditions involved in each
+control-flow decision, and all I/O actions with their corresponding values.
+Because I/O and nondeterminism are modeled explicitly within the state, the
+execution of any program can be deterministically replayed from its seed
+configuration together with the recorded inputs.
+
+
+9. Example
+----------
+
+FUNC IS_PRIME(n)[ # Primality test for n
+  IF(LTE(n,1))[
+    RETURN(0)
+  ]
+  IF(EQ(n,10))[
+    RETURN(1)
+  ]
+  IF(EQ(MOD(n,10),0))[
+    RETURN(0)
+  ]
+  i = 11
+  WHILE(LTE(MUL(i,i), n))[
+    IF(EQ(MOD(n,i),0))[
+      RETURN(0)
+    ]
+    i = ADD(i,10)
+  ]
+  RETURN(1)
+]
+
+10. Tracebacks and Error Reporting
+---------------------------------
+
+When a runtime error or exception occurs the interpreter must produce a
+deterministic, human-readable traceback derived from the state log. The
+traceback exposes the call stack (frames) at the point of failure and
+associates each frame with both (1) a compact source-location description
+and (2) the relevant serialized state sections and state-transformation
+records from the state log. The goal is to provide developers with the
+same immediate debugging information that Python's traceback provides but
+with the additional ability to inspect the exact machine states and the
+rewrite steps that led to the error for deterministic replay.
+
+10.1 Traceback semantics (high level)
+
+- Trigger: a traceback is produced when a runtime error occurs that
+  prevents normal forward execution (e.g., an assertion failure, divide
+  by zero, undefined variable reference, executing `RETURN` outside of a
+  function, or any other interpreter-defined runtime error).
+- Content: the traceback must list frames in chronological call order
+  from the outermost (earliest) frame to the innermost (where the
+  error occurred), and for each frame include: function name (or
+  `<top-level>` for global code), precise source location, a short
+  excerpt of the offending statement, and identifiers linking to the
+  corresponding states in the state log.
+- State linkage: every frame must reference at least one serialized
+  state snapshot from the state log that corresponds to the machine
+  configuration immediately before the failing rewrite step for that
+  frame. The innermost frame must also reference the rewrite (transition)
+  record that produced the error (that is, the failing step).
+- Presentation modes: the interpreter must support a concise textual
+  traceback (default) and a verbose mode. The concise mode shows the
+  usual file/line/function stack with a one-line code excerpt per
+  frame and the state-log index. The verbose mode prints, for each
+  frame, the selected state sections (for example: local environment,
+  selected global variables, and the expression evaluation stack) and
+  the full state-transformation record (from_state -> to_state, the
+  rewrite rule name and arguments). The verbose mode is intended for
+  interactive debugging and post-mortem inspection.
+
+10.2 Required fields and invariants in the state log
+
+To make tracebacks precise and implementable, the state log (and the
+machine state representation) must include the following information at
+every step when relevant:
+
+- `step_index` (integer): monotonically increasing index of the rewrite
+  step in the state log.
+- `state_id` (opaque string or integer): stable identifier for the
+  serialized machine state (seed, intermediate, or terminal).
+- `source_location` (optional): when a rewrite step is associated with a
+  program location, include a `source_location` record with at least the
+  following fields: `file` (string), `line` (integer), and `statement`
+  (string containing the top-level statement text or canonical snippet).
+- `frame_id` (when present): identifier for the active call-frame in
+  that state; frames must be addressable and referable by the traceback
+  generator.
+- `env_snapshot` (selectable): a serialized partial view of the state
+  containing bindings for the local variables of the active frame and,
+  where reasonable, a subset of global variables. The interpreter may
+  elide large or sensitive values by policy, but must provide a clear
+  indication when values are elided.
+- `rewrite_record`: for each step that performs a state transition, the
+  log must include a record describing the rewrite rule (name, inputs,
+  and parameters), and the `from_state_id` and `to_state_id` pairs.
+
+10.3 Traceback textual format (recommended)
+
+The following format is recommended for the concise textual traceback:
+
+Traceback (most recent call last):
+  File "<file>", line <line>, in <function_or_<top-level>>
+    <statement excerpt>
+    State log index: <step_index>  State id: <state_id>
+
+The final (innermost) frame is then followed by a short error message
+that includes the failing rewrite (for example: `DivisionByZero`), the
+rewrite rule name and the `step_index` at which it failed. In verbose
+mode, each frame block is followed by a labelled `State snapshot:` and a
+`State transformation:` section that contain the serialized `env_snapshot`
+and the `rewrite_record` (including `from_state_id` and `to_state_id`) so
+that the failure can be reproduced by replaying the states and the
+associated inputs.
+
+10.4 Machine-readable traceback (JSON)
+
+The interpreter must also be able to emit a machine-readable traceback
+structure suitable for diagnostics tools and editors. A suggested JSON
+schema is:
+
+{
+  "error": {
+    "type": "DivisionByZero",
+    "message": "Divide by zero in DIV(foo, 0)",
+    "failing_step_index": 123
+  },
+  "traceback": [
+    {
+      "frame_index": 0,
+      "name": "<top-level>",
+      "source_location": {"file": "prog.asm", "line": 12, "statement": "foo = INPUT"},
+      "state_id": "s_0003",
+      "step_index": 42,
+      "env_snapshot": {"foo": 5, "bar": 10}
+    },
+    {
+      "frame_index": 1,
+      "name": "compute",
+      "source_location": {"file": "lib.asm", "line": 88, "statement": "DIV(a, b)"},
+      "state_id": "s_0123",
+      "step_index": 123,
+      "env_snapshot": {"a": 17, "b": 0},
+      "rewrite_record": {"rule": "DIV", "from_state_id": "s_0122", "to_state_id": "s_0123", "args": [17, 0]}
+    }
+  ]
+}
+
+The schema above is a guideline; implementations may extend it with
+additional fields (for example, a `diff` between `from_state` and
+`to_state`, or full serialized states). The only requirement is that a
+consumer of the state log can identify which state and which rewrite
+step correspond to each frame.
+
+10.5 Point of origin in source code
+
+The trace must clearly identify the point of origin (the expression or
+statement that directly caused the error) by including the `source_location`
+and the `step_index` of the failing rewrite. Implementations should also
+include the exact token or sub-expression when available (for example,
+the `DIV(a,0)` call that produced the division-by-zero), and the
+surrounding source excerpt (at least one line above and below, if
+available) to make diagnosis easier.
+
+10.6 Integrating tracebacks with the disassembler and replay
+
+- The disassembler view must support jumping from a printed traceback to
+  the corresponding state-log entry (`step_index`) and to the
+  reconstructed source location so that a user can inspect the full
+  `from_state` and `to_state` pair and step through the rewrite that
+  produced the error.
+- Because the state log records I/O and nondeterminism explicitly, the
+  disassembler/replayer must be able to replay the exact failing step
+  when given the seed configuration and the recorded inputs.
+
+10.7 Implementation notes for builders
+
+- The instrumentation needed for tracebacks is primarily bookkeeping:
+  ensure the state log records `step_index`, `state_id`, `frame_id`, and
+  optional `source_location` for each step when appropriate.
+- When collecting `env_snapshot` data, prefer including only the local
+  environment of the active frame and a small set of globals to keep
+  tracebacks readable; provide a `--verbose` or similar flag to emit
+  full snapshots.
+- Security note: because state snapshots may contain sensitive data,
+  implementations should provide a configurable policy to redact or
+  obfuscate values when generating tracebacks for untrusted logs.
+
+10.8 Example (concise textual traceback)
+
+Traceback (most recent call last):
+  File "prog.asm", line 21, in <top-level>
+    result = compute(foo, bar)
+    State log index: 121  State id: s_0121
+  File "lib.asm", line 88, in compute
+    x = DIV(a, b)
+    State log index: 123  State id: s_0123
+DivisionByZero: attempted to DIV by zero at step_index=123 (rewrite: DIV)
+
+This example shows the outer call at the program top-level and the
+innermost failing call in `compute`. A verbose report would additionally
+print the `env_snapshot` for `compute` showing `a: 17, b: 0` and the
+full `rewrite_record` describing the DIV operation that failed.
+
+  11. Interpreter Use
+  -------------------
+
+  This section documents how the reference interpreter accepts program input
+  and how to enable verbose tracebacks that include environment snapshots.
+
+  - Invocation arguments: the interpreter reads its first program argument
+    (that is, `argv[1]`) as the program source. If the `-source` flag is not
+    present, `argv[1]` is interpreted as a path to a source file and the
+    interpreter loads and parses that file. If the `-source` flag is present,
+    `argv[1]` is treated as the source text itself (a string containing the
+    program) and is parsed directly without reading a file.
+
+  - Verbose tracebacks: if the `-verbose` flag is supplied on the command
+    line, tracebacks include the environment snapshots described in
+    Section 10.8. In concise traceback mode the `-verbose` flag causes the
+    interpreter to attach an `env_snapshot` entry to each frame shown; in
+    verbose traceback mode the same flag expands the printed `State snapshot:`
+    blocks to include the selected local environment and any small set of
+    globals included by policy. The snapshot contents follow the requirements
+    in Section 10.2 and are suitable for deterministic replay.
+
+  Notes:
+  - The interpreter may support additional flags and a different ordering of
+    arguments; the rules above define the semantics for `argv[1]`, `-source`,
+    and `-verbose` specifically and are intended to be stable for tooling and
+    replay purposes.
+
+  Example invocations (illustrative):
+  - File mode: `interpreter program.asm`
+  - Source-string mode: `interpreter -source "foo = INPUT\nPRINT(foo)" -verbose`
+
+APIREF — Quick Reference
+------------------------
+
+This quick reference lists common built-in functions, operators and
+statement signatures for fast lookup. Use this when you need the name or
+argument shape but don't want to re-read the full specification.
+
+Function / Operator Signatures (expression position)
+- 'INPUT()' or 'INPUT' : returns integer from input stream (0 for empty)
+- 'PRINT(a1, a2, ..., aN)' : prints arguments (side-effect), return value discarded
+- 'ASSERT(a)' : crashes if 'a' is 0
+- 'DEL(x)' : delete variable 'x' from environment
+
+Arithmetic
+- 'ADD(a, b)' : a + b
+- 'SUB(a, b)' : a - b
+- 'MUL(a, b)' : a * b
+- 'DIV(a, b)' : floor(a / b)
+- 'CEIL(a, b)' : ceil(a / b)
+- 'POW(a, b)' : a ^ b (b >= 0)
+- 'MOD(a, b)' : remainder of a / b
+ - 'NEG(a)' : -a (additive inverse)
+ - 'ABS(a)' : absolute value of a
+ - 'GCD(a, b)' : greatest common divisor of a and b
+ - 'LCM(a, b)' : least common multiple of a and b
+
+Bitwise / Boolean
+- 'BAND(a, b)' : bitwise AND
+- 'BOR(a, b)' : bitwise OR
+- 'BXOR(a, b)' : bitwise XOR
+- 'BNOT(a)' : bitwise complement
+- 'AND(a, b)' : Boolean AND -> 0 or 1
+- 'OR(a, b)' : Boolean OR -> 0 or 1
+- 'XOR(a, b)' : Boolean XOR -> 0 or 1
+- 'NOT(a)' : Boolean NOT -> 0 or 1
+
+Comparisons
+- 'EQ(a, b)' : 1 if a == b else 0
+- 'GT(a, b)' : 1 if a > b else 0
+- 'LT(a, b)' : 1 if a < b else 0
+- 'GTE(a, b)' : 1 if a >= b else 0
+- 'LTE(a, b)' : 1 if a <= b else 0
+
+Aggregates / Utilities
+- 'MAX(a1, ..., aN)' : max of arguments
+- 'MIN(a1, ..., aN)' : min of arguments
+- 'SUM(a1, ..., aN)' : sum of arguments
+- 'LEN(a1, ..., aN)' : number of arguments (N)
+- 'ALL(a1, ..., aN)' : 1 if all non-zero else 0
+- 'ANY(a1, ..., aN)' : 1 if any non-zero else 0
+ - 'PROD(a1, ..., aN)' : product of arguments
+
+Logarithms
+- 'LOG(a)' : floor(log2(a)) for a > 0
+- 'CLOG(a)' : ceil(log2(a)) for a > 0
+
+Control / Function / Statement Signatures (statement position)
+- Assignment: 'identifier = expression'
+- Block: '[ statement1 ... statementN ]' or '{ statement1 ... statementN }'
+- 'IF(condition)[ block ]' (optional 'ELSIF(condition)[ block ]' ... 'ELSE[ block ]')
+- 'WHILE(condition)[ block ]'
+- 'FOR(counter, target)[ block ]' : 'counter' initialized to 0, loop until counter >= target
+- 'FUNC name(arg1, arg2, ..., argN)[ block ]' : defines a function
+- 'RETURN(a)' : return from function with value 'a'
+
+Notes
+- All built-ins return integers. Boolean contexts treat 0 as false and
+  non-zero as true. Boolean operators return '0' or '1'.
+- Argument evaluation order: left-to-right.
+- User-defined functions use the same call syntax as built-ins.
