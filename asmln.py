@@ -1069,7 +1069,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
         return program.statements
 
     def run_repl(verbose: bool) -> int:
-        print("ASM-Lang REPL. Enter statements, blank line to run buffer.")
+        print("\x1b[38;2;153;221;255mASM-Lang\033[0m REPL. Enter statements, blank line to run buffer.")
         interpreter = Interpreter(source="", filename="<repl>", verbose=verbose)
         global_env = Environment()
         global_frame = interpreter._new_frame("<repl>", global_env, None)
