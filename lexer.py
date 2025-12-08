@@ -42,6 +42,7 @@ SYMBOLS = {
     "}": "RBRACE",
     ",": "COMMA",
     "=": "EQUALS",
+    ":": "COLON",
 }
 
 
@@ -81,6 +82,9 @@ class Lexer:
                 tokens.append(Token(symbols[ch], ch, self.line, self.column))
                 _advance()
                 continue
+            if ch == '"':
+                tokens.append(self._consume_string())
+                continue
             if ch == "-":
                 tokens.append(self._consume_signed_number())
                 continue
@@ -104,6 +108,25 @@ class Lexer:
         line, col = self.line, self.column
         digits = self._consume_binary_digits()
         return Token("NUMBER", digits, line, col)
+
+    def _consume_string(self) -> Token:
+        line, col = self.line, self.column
+        self._advance()  # consume opening quote
+        chars: List[str] = []
+        while not self._eof:
+            ch = self._peek()
+            if ch == '"':
+                self._advance()
+                return Token("STRING", "".join(chars), line, col)
+            if ch == "\n":
+                raise ASMParseError(
+                    f"Unterminated string literal at {self.filename}:{line}:{col}"
+                )
+            chars.append(ch)
+            self._advance()
+        raise ASMParseError(
+            f"Unterminated string literal at {self.filename}:{line}:{col}"
+        )
 
     def _consume_signed_number(self) -> Token:
         line, col = self.line, self.column
@@ -151,10 +174,10 @@ class Lexer:
         return Token(token_type, value, line, col)
 
     def _is_identifier_start(self, ch: str) -> bool:
-        return (ch in "abcdefghijklmnopqrstuvwxyz23456789;/ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|:<>?")
+        return (ch in "abcdefghijklmnopqrstuvwxyz23456789;/ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|<>?")
 
     def _is_identifier_part(self, ch: str) -> bool:
-        return (ch in "abcdefghijklmnopqrstuvwxyz1234567890;./ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|:<>?")
+        return (ch in "abcdefghijklmnopqrstuvwxyz1234567890;./ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|<>?")
         # "." is not actually a valid character in namespace symbols, but is allowed since it is used to separate module names from namespace symbols.
 
     def _consume_line_continuation(self) -> None:

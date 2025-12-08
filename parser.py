@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple, Union
 
 from lexer import ASMParseError, Token
 
@@ -36,6 +36,7 @@ class Block(Node):
 class Assignment(Statement):
     target: str
     expression: "Expression"
+    declared_type: Optional[str]
 
 
 @dataclass
@@ -73,7 +74,8 @@ class ForStatement(Statement):
 @dataclass
 class FuncDef(Statement):
     name: str
-    params: List[str]
+    params: List[Tuple[str, str]]
+    return_type: str
     body: Block
 
 
@@ -108,7 +110,8 @@ class Expression(Node):
 
 @dataclass
 class Literal(Expression):
-    value: int
+    value: Union[int, str]
+    literal_type: str
 
 
 @dataclass
@@ -144,6 +147,8 @@ class Parser:
         return statements
 
     def _parse_statement(self) -> Statement:
+        if self._is_typed_assignment_start():
+            return self._parse_typed_assignment()
         token = self._peek()
         if token.type == "FUNC":
             return self._parse_func()
@@ -164,31 +169,40 @@ class Parser:
         if token.type == "GOTOPOINT":
             return self._parse_gotopoint()
         if token.type == "IDENT" and self._peek_next().type == "EQUALS":
-            return self._parse_assignment()
+            return self._parse_assignment(None)
         expr: Expression = self._parse_expression()
         return ExpressionStatement(location=expr.location, expression=expr)
 
-    def _parse_assignment(self) -> Assignment:
+    def _parse_assignment(self, declared_type: Optional[str]) -> Assignment:
         ident = self._consume("IDENT")
         self._consume("EQUALS")
         expr = self._parse_expression()
         location: SourceLocation = self._location_from_token(ident)
-        return Assignment(location=location, target=ident.value, expression=expr)
+        return Assignment(location=location, target=ident.value, expression=expr, declared_type=declared_type)
+
+    def _parse_typed_assignment(self) -> Assignment:
+        type_token = self._consume_type_token()
+        self._consume("COLON")
+        return self._parse_assignment(type_token.value)
 
     def _parse_func(self) -> FuncDef:
         keyword = self._consume("FUNC")
         name_token = self._consume("IDENT")
         self._consume("LPAREN")
-        params: List[str] = []
+        params: List[Tuple[str, str]] = []
         if self._peek().type != "RPAREN":
             while True:
-                params.append(self._consume("IDENT").value)
+                type_token = self._consume_type_token()
+                self._consume("COLON")
+                params.append((type_token.value, self._consume("IDENT").value))
                 if not self._match("COMMA"):
                     break
         self._consume("RPAREN")
+        self._consume("COLON")
+        return_type = self._consume_type_token()
         block: Block = self._parse_block()
         location: SourceLocation = self._location_from_token(keyword)
-        return FuncDef(location=location, name=name_token.value, params=params, body=block)
+        return FuncDef(location=location, name=name_token.value, params=params, return_type=return_type.value, body=block)
 
     def _parse_if(self) -> IfStatement:
         keyword = self._consume("IF")
@@ -276,7 +290,10 @@ class Parser:
                 value = -int(sval[1:], 2)
             else:
                 value = int(sval, 2)
-            return Literal(location=self._location_from_token(number), value=value)
+            return Literal(location=self._location_from_token(number), value=value, literal_type="INT")
+        if token.type == "STRING":
+            string_token = self._consume("STRING")
+            return Literal(location=self._location_from_token(string_token), value=string_token.value, literal_type="STR")
         if token.type == "IDENT":
             ident: Token = self._consume("IDENT")
             location: SourceLocation = self._location_from_token(ident)
@@ -332,3 +349,17 @@ class Parser:
         if 0 <= line_index < len(self.source_lines):
             statement = self.source_lines[line_index].strip()
         return SourceLocation(file=self.filename, line=token.line, column=token.column, statement=statement)
+
+    def _consume_type_token(self) -> Token:
+        token = self._consume("IDENT")
+        if token.value not in {"INT", "STR"}:
+            raise ASMParseError(f"Unknown type '{token.value}' at line {token.line}")
+        return token
+
+    def _is_typed_assignment_start(self) -> bool:
+        current = self._peek()
+        if current.type != "IDENT" or current.value not in {"INT", "STR"}:
+            return False
+        if self.index + 1 >= len(self.tokens):
+            return False
+        return self._peek_next().type == "COLON"

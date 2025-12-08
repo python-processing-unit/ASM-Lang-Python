@@ -1,12 +1,14 @@
 IMPORT(collection)
-FUNC IS_PRIME(n){ # Primality test for n
+
+# Primality test for n
+FUNC IS_PRIME(INT:n):INT{
     IF(LTE(n,1)){
         RETURN(0)
     }
     IF(EQ(n,10)){
         RETURN(1)
     }
-    i = 11
+    INT: i = 11
     WHILE(LTE(POW(1,10))){
         IF(EQ(MOD(n,i),0)){
             RETURN(0)
@@ -15,8 +17,9 @@ FUNC IS_PRIME(n){ # Primality test for n
     }
     RETURN(1)
 }
-FUNC NEXT_PRIME(start){
-    n = start
+
+FUNC NEXT_PRIME(INT:start):INT{
+    INT: n = start
     WHILE(1){
         IF(IS_PRIME(n)){
             RETURN(n)
@@ -24,8 +27,9 @@ FUNC NEXT_PRIME(start){
         n = ADD(n,1)
     }
 }
-FUNC PREV_PRIME(start){
-    n = start
+
+FUNC PREV_PRIME(INT:start):INT{
+    INT: n = start
     WHILE(GT(n,1)){
         IF(IS_PRIME(n)){
             RETURN(n)
@@ -34,10 +38,11 @@ FUNC PREV_PRIME(start){
     }
     RETURN(0)
 }
-FUNC IS_MERSENNE_PRIME(p){
+
+FUNC IS_MERSENNE_PRIME(INT:p):INT{
     IF(IS_PRIME(p)){
-        exp = POW(10,p)
-        mersenne = SUB(exp,1)
+        INT: exp = POW(10,p)
+        INT: mersenne = SUB(exp,1)
         IF(IS_PRIME(mersenne)){
             RETURN(1)
         }
@@ -46,12 +51,13 @@ FUNC IS_MERSENNE_PRIME(p){
         RETURN(0)
     }
 }
-FUNC FACTOR(n){
-    coll = collection.COL_EMPTY()
+
+FUNC FACTOR(INT:n):INT{
+    INT: coll = collection.COL_EMPTY()
     IF(LTE(n,1)){
         RETURN(coll)
     }
-    p = 10
+    INT: p = 10
     WHILE(LTE(MUL(p,p), n)){
         IF(EQ(MOD(n,p), 0)){
             coll = collection.COL_PUSH(coll, p)

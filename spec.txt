@@ -16,11 +16,13 @@ explicitly for deterministic replay.
 The language is a familiar statement-based, imperative language. Programs
 consist of variable declarations via assignment, expressions, and
 control-flow constructs such as 'IF', 'ELSIF', 'ELSE', 'WHILE', and 'FOR'.
-All data values are (conceptually unbounded) binary integers, interpreted as
-either signed or unsigned according to the implementation. Computation
-proceeds by evaluating expressions and executing statements in sequence, with
-explicit constructs for branching and looping. Input and output are modeled
-through built-in operators, in particular 'INPUT' and 'PRINT'.
+ASM-Lang now has two runtime data types: binary integers and strings.
+Identifiers, function parameters, and return values are statically typed;
+the type of every symbol must be declared when it is first introduced.
+Computation proceeds by evaluating expressions and executing statements in
+sequence, with explicit constructs for branching and looping. Input and
+output are modeled through built-in operators, in particular 'INPUT' and
+'PRINT'.
 
 The interpreter compiles source code into a single initial configuration (the
 seed state), which includes the program code, an empty variable environment,
@@ -47,10 +49,11 @@ A comment begins with the '#' character and continues to the end of the
 current line. Comments have no effect on execution.
 
 The program text is divided into several token kinds: binary integer
-literals (Section 3.1); identifiers for variable names and user-defined
+literals (Section 3.1); string literals delimited by double quotation marks
+('"', Section 3.2); identifiers for variable names and user-defined
 function names (Section 2.5); keywords and built-ins (control-flow
 keywords, built-in operators and functions; see Sections 4 and 5); and
-delimiters, namely '(', ')', '[', ']', '{', '}', ',', and '='.
+delimiters, namely '(', ')', '[', ']', '{', '}', ',', ':', and '='.
 
 Keywords: The language's reserved keywords (for example, 'IF', 'WHILE',
 'FUNC', etc.) are matched by the lexer exactly as listed in this
@@ -98,7 +101,7 @@ which match the reference lexer implementation:
   - Uppercase letters 'A'–'Z'
   - Decimal digits '2'–'9'
   - The punctuation and symbol characters
-    `; / ! @ $ % & ~ _ + | : < > ?`
+    `; / ! @ $ % & ~ _ + | < > ?`
 
 - Subsequent characters in an identifier may be any of the following:
 
@@ -106,7 +109,7 @@ which match the reference lexer implementation:
   - Uppercase letters 'A'–'Z'
   - Decimal digits '0'–'9'
   - The punctuation and symbol characters
-    `; . / ! @ $ % & ~ _ + | : < > ?`
+    `; . / ! @ $ % & ~ _ + | < > ?`
 
   As noted above, non-ASCII characters remain disallowed, and the
   delimiter characters '{', '}', '[', ']', '(', ')', '=', ',', and '#'
@@ -122,19 +125,30 @@ as plain identifiers in source code.
 3. Data Model
 -------------
 
-The sole literal data type is the binary integer. A binary integer literal is
-either (1) an unsigned non-empty sequence of characters drawn from the set
-'{0,1}' (for example, '0', '1', '1011', '100110'), or (2) a signed literal
-formed by a leading '-' followed by optional whitespace (spaces, horizontal
-tabs, or carriage returns) and then a non-empty sequence of '{0,1}'. The '-'
-is part of the literal spelling and is not an operator; it may only appear in
-this leading position. A '-' that is not immediately introducing a literal is
-a syntax error.
+ASM-Lang supports two literal data types: binary integers and strings.
 
-Every runtime value is a mathematical integer. The language does not support
-fractional or real-valued numbers. All operations that would otherwise
-produce non-integer results, such as division, are defined with explicit
-rounding behavior (see Section 4.2).
+Binary integer literal: an unsigned non-empty sequence of '{0,1}' (for
+example, '0', '1', '1011'), or a signed literal formed by a leading '-' (the
+dash is part of the literal, not an operator) followed by optional spaces,
+tabs, or carriage returns and then a non-empty sequence of '{0,1}'. A '-'
+that does not immediately introduce a literal is a syntax error.
+
+String literal: a sequence of ASCII characters enclosed in double quotation
+marks '"' with no escape processing. Newlines are not permitted inside string
+literals. The literal's value is the contained character sequence.
+
+Every runtime value has a static type: INT or STR. Integers are
+conceptually unbounded mathematical integers. Strings are byte strings of
+ASCII characters. Operations that would otherwise produce non-integer
+results are defined with explicit rounding behaviour (see Section 4.2) and
+operate only on INT values. When a Boolean interpretation is required,
+integers treat 0 as false and non-zero as true. For Boolean operators that
+accept strings (Section 4), an empty string is false and any non-empty string
+is true unless otherwise specified. Control-flow conditions ('IF', 'ELSIF',
+'WHILE') and 'ASSERT' convert strings to integers using the same rules as the
+'INT' built-in: if the string is empty, it converts to 0; if it consists only
+of '0' and '1', it converts to the corresponding binary integer; otherwise it
+converts to 1.
 
 
 4. Expressions and Operators
@@ -147,100 +161,58 @@ are separated by commas, and spaces may appear around commas and inside
 parentheses without changing meaning. Each operator has either a fixed or a
 variable arity as described below.
 
-All built-ins operate on integer values and, unless explicitly stated
-otherwise, return an integer result. The language has no separate Boolean
-type; instead, integers are interpreted as Boolean values in conditional or
-logical contexts, with '0' representing false and any non-zero value
-representing true. Boolean operators always return '0' or '1'. Unless
-explicitly noted, any multi-argument operator requires at least one
-argument.
+All built-ins operate on typed values and, unless explicitly stated
+otherwise, return an integer result. Unless explicitly noted, any
+multi-argument operator requires at least one argument.
 
-Logical operators 'AND(a, b)', 'OR(a, b)', 'XOR(a, b)', and 'NOT(a)' operate
-on the Boolean interpretation of their integer arguments. 'AND' returns '1'
-only if both arguments are non-zero, 'OR' returns '1' if at least one is
-non-zero, and 'XOR' returns '1' if exactly one is non-zero. 'NOT' returns '1'
-if its argument is '0'; otherwise it returns '0'.
+Integer-only operators: the following accept only INT arguments and return an
+INT. Supplying a STR raises a runtime error: ADD, SUB, MUL, DIV, CDIV, POW,
+MOD, NEG, ABS, GCD, LCM, BAND, BOR, BXOR, BNOT, SHL, SHR, GT, LT, GTE, LTE,
+SUM, PROD, LOG, and CLOG. Their semantics match the previous integer-only
+definition (for example, DIV is floor division, POW requires a non-negative
+exponent, SHL/SHR require non-negative shift counts, etc.).
 
-Bitwise operators act on the binary representation of integers. 'BAND(a, b)'
-computes a bitwise AND, 'BOR(a, b)' a bitwise OR, 'BXOR(a, b)' a bitwise XOR,
-and 'BNOT(a)' the bitwise complement. 'SHL(a, b)' shifts 'a' left by 'b' bits
-and 'SHR(a, b)' shifts 'a' right by 'b' bits using arithmetic right-shift
-(matching two's-complement semantics). Shift counts must be non-negative or
-execution raises a runtime error. The interpretation of sign and bit width for
-these operations is implementation-defined but must be consistent across all
-bitwise operators.
+Mixed-type operators (INT or STR):
+- LEN(a1, ..., aN) returns the number of supplied arguments (an INT) and does
+  not inspect the argument types.
+- AND, OR, XOR, NOT, ALL, ANY treat INT values as usual (0 is false, non-zero
+  is true) and treat STR values as false when empty and true when non-empty.
+  These operators always return an INT 0 or 1.
+- EQ(a, b) returns 1 when both arguments have the same type and equal
+  contents, else 0. When types differ, the result is 0 without coercion.
+- SLICE(a, hi, lo) requires 'hi' and 'lo' to be INT. If 'a' is INT, it returns
+  the inclusive bit-slice [hi:lo] as before (bit 0 is the least-significant
+  bit). If 'a' is STR, it returns the inclusive character slice from index
+  'hi' down to 'lo' counting from the right (index 0 is the last character);
+  indices must be non-negative and within the string.
+- MAX / MIN: when all arguments are INT they return the numeric max/min. When
+  all arguments are STR they return the longest/shortest string (ties are
+  implementation-defined). Mixing INT and STR is a runtime error.
+- JOIN: when all arguments are INT it concatenates binary spellings with the
+  same sign rule as before (all non-negative or all negative). When all
+  arguments are STR it concatenates the strings. Mixing INT and STR is a
+  runtime error.
 
-Bitfield and slicing helpers: 'SLICE(a, hi, lo)' extracts the inclusive
-bit-range [hi:lo] from the binary representation of 'a' and returns it as an
-unsigned integer. Bits are numbered starting at 0 for the least-significant
-bit. If 'hi < lo' or either index is negative, the operation raises a
-runtime error. For negative values of 'a', implementations use the low-order
-bits of its two's-complement representation (consistent with other bitwise
-operations).
+Conversion operators:
+- INT(s) converts a STR to INT: empty string -> 0; strings containing only
+  '0' and '1' -> the corresponding binary integer; any other non-empty string
+  -> 1. Passing an INT returns it unchanged.
+- STR(n) converts an INT to its binary spelling as a STR (including a leading
+  '-' for negative integers). Passing a STR returns it unchanged.
 
-Arithmetic operators include 'ADD(a, b)' for integer addition, 'SUB(a, b)'
-for subtraction ('a - b'), and 'MUL(a, b)' for multiplication. 'DIV(a, b)'
-performs integer division with floor rounding, returning '⌊a / b⌋'; division
-by zero is implementation-defined but should raise a runtime error.
-'CDIV(a, b)' performs integer division with ceiling rounding, returning
-'⌈a / b⌉' and similarly treating division by zero as an error.
-'POW(a, b)' computes integer exponentiation 'a^b' for integer exponents
-'b ≥ 0'; behavior for negative exponents is undefined or
-implementation-defined. The modulus operator 'MOD(a, b)' returns the
-remainder of dividing 'a' by 'b', typically chosen so that
-'0 ≤ result < |b|', with the exact convention fixed by the implementation.
+Input, output, and assertions:
+- INPUT() returns a STR containing the raw input line (no implicit numeric
+  conversion). The I/O event is recorded for replay.
+- PRINT(a1, ..., aN) accepts INT or STR. INT arguments are rendered in binary
+  (with '-' for negatives); STR arguments are emitted as-is. The return value
+  is INT 0.
+- ASSERT(a) interprets its argument using the INT conversion rules for
+  conditions (empty string -> 0, binary string -> integer value, other
+  non-empty string -> 1). If the result is 0, execution halts with an
+  assertion failure.
 
-The unary operator 'NEG(a)' returns the additive inverse of 'a' (that is,
-the value '-a'). The unary operator 'ABS(a)' returns the absolute value of
-'a' (that is, 'a' if 'a ≥ 0' and '-a' otherwise).
-
-The arithmetic library also provides functions for common number-theoretic
-operations. 'GCD(a, b)' returns the greatest common divisor of 'a' and 'b'
-for integer arguments, with the convention that 'GCD(0, 0)' is
-implementation-defined (commonly 0). 'LCM(a, b)' returns the least common
-multiple of 'a' and 'b' for integer arguments; if either argument is 0 the
-result is typically 0, with exact behavior left to the implementation.
-
-Finally, 'PROD(a1, a2, ..., aN)' computes the integer product of its
-arguments (for 'N ≥ 1'); if any argument is '0' the result is '0'.
-
-Several operators aggregate multiple arguments. 'MAX(a1, ..., aN)' and
-'MIN(a1, ..., aN)' return, respectively, the larger and smaller of their two 
-arguments. 'ALL(a1, ..., an)' performs a Boolean AND over any number of
-arguments 'n ≥ 1', returning '1' if all are non-zero and '0' otherwise;
-'ANY(a1,..., an)' performs a Boolean OR over any number of arguments, returning
-'1' if at least one is non-zero and '0' otherwise. 'SUM(a1, a2, ..., an)'
-computes the integer sum of its arguments. 'LEN(a1, a2, ..., an)' returns the
-number of arguments supplied, that is, 'n'. 'JOIN(a1, ..., aN)' concatenates
-the binary spellings of its arguments in call order and returns the integer
-whose binary representation is that concatenation. All arguments must share
-the same sign: either every argument is non-negative (the usual case), or
-every argument is negative. When all arguments are non-negative the result
-is the non-negative integer whose binary representation is the concatenation
-of the arguments' binary spellings (for example, 'JOIN(10,1)' -> '101'). When
-all arguments are negative the function concatenates the binary spellings of
-the absolute values and returns the negation of the resulting integer
-(for example, 'JOIN(-10,-1)' -> '-101'). Supplying a mixture of positive and
-negative arguments is a runtime error.
-
-Logarithmic operators are defined in base 2. 'LOG(a)' returns the floor of
-the base-2 logarithm: for 'a > 0', it is the greatest integer 'k' such that
-'2^k ≤ a'. 'CLOG(a)' returns the ceiling of the base-2 logarithm: for
-'a > 0', it is the smallest integer 'k' such that '2^k ≥ a'. For 'a ≤ 0',
-both 'LOG' and 'CLOG' have implementation-defined behavior and should raise
-a runtime error.
-
-Comparison operators return '1' if the comparison holds and '0' otherwise.
-'EQ(a, b)' tests equality, while 'GT(a, b)' and 'LT(a, b)' test strict
-greater-than and strict less-than, respectively. 'GTE(a, b)' tests
-greater-than-or-equal and 'LTE(a, b)' tests less-than-or-equal.
-
-Input, output, and assertions are expressed through dedicated operators.
-'PRINT(a1, a2, ..., an)' outputs its arguments to the console in an
-implementation-defined textual format. It is typically used in statement
-position, and any return value is discarded. The effect on the external
-world is recorded in the execution log, ensuring that replay remains
-deterministic.
+Other operators (unchanged): IMPORT, MAIN, DEL, EXIST, and EXIT retain their
+previous meanings but now operate in a typed environment.
 
 'IMPORT(name)' loads and executes another source file as a distinct module
 namespace. The argument must be an identifier naming a module; the
@@ -330,11 +302,11 @@ curly brackets: '[ statement1 ... statementN ]' or
 must match (that is, '[' closes with ']' and '{' closes with '}'). Blocks
 serve as the bodies of control-flow constructs and functions.
 
-Assignments have the syntax 'identifier = expression', with spaces around the
-equals sign being optional. If the identifier does not yet exist, the
-assignment creates it and assigns memory; if it already exists, its stored
-value is overwritten. Variables are deallocated only when 'DEL(identifier)'
-is executed.
+Assignments have the syntax 'TYPE : identifier = expression' on first use,
+where TYPE is 'INT' or 'STR'. Spaces around the colon and equals sign are
+optional. Subsequent assignments to an existing identifier may omit the type
+but must preserve the original type. Variables are deallocated only when
+'DEL(identifier)' is executed.
 
 The language provides 'IF', 'ELSIF', and 'ELSE' constructs for conditional
 execution. An 'IF' statement has the general form 'IF(condition)[ block ]' or
@@ -350,6 +322,9 @@ evaluated in order until one is non-zero; its block then executes and the
 chain terminates. If no 'IF' or 'ELSIF' condition is satisfied and an
 'ELSE' is present, the 'ELSE' block executes; if there is no 'ELSE', no block
 in the chain executes.
+Conditions accept INT or STR. STR conditions are first converted to INT using
+the 'INT' built-in rules (empty -> 0; binary string -> that integer; other
+non-empty -> 1) before truthiness is checked.
 
 Loops are provided via 'WHILE' and 'FOR'. A 'WHILE' loop has the form
 'WHILE(condition)[ block ]' or 'WHILE(condition){ block }'. On each
@@ -361,7 +336,8 @@ continues with the next statement.
 The 'FOR' construct has the form 'FOR(counter, target)[ block ]' or
 'FOR(counter, target){ block }', where 'counter' is an identifier and
 'target' is an expression. At loop entry, 'target' is evaluated once to a
-value 'T', and 'counter' is initialized to '0', creating it if necessary.
+value 'T' (must be INT), and 'counter' is initialized to the INT value '0',
+creating it as an INT if necessary.
 The loop then repeats: if the current value of 'counter' is greater than or
 equal to 'T', the loop exits; otherwise, the block executes and 'counter' is
 incremented by '1' before the next iteration.
@@ -395,25 +371,23 @@ remain deterministic.
 6. Functions
 ------------
 
-Functions are defined using the 'FUNC' keyword. The canonical form is
-'FUNC name(arg1, arg2, ..., argN)[ block ]' or
-'FUNC name(arg1, arg2, ..., argN){ block }', where 'name' is an identifier
-and each 'argK' is an identifier. Defining a function binds 'name' to a
-callable body with the specified formal parameters. As noted earlier,
-function names must not conflict with the names of built-in operators or
-functions.
+Functions are defined using the 'FUNC' keyword with explicit parameter and
+return types. The canonical form is
+ 'FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R[ block ]' or
+ 'FUNC name(T1:arg1, ..., TN:argN):R{ block }', where each 'Tk' and 'R' is
+ either 'INT' or 'STR'. Defining a function binds 'name' to a callable body
+ with the specified typed formal parameters. Function names must not
+ conflict with the names of built-in operators or functions.
 
 A user-defined function is called with the same syntax as a built-in:
-'name(expr1, expr2, ..., exprN)'. The arguments are evaluated
-left-to-right, producing values that are then bound to the function’s formal
-parameters in a new environment (activation record). The function body block
-executes in this environment, which may or may not have access to
-surrounding or global variables depending on the chosen scoping model
-(static or dynamic, to be fixed by the implementation). If a 'RETURN(v)'
-statement is executed within the body, the function terminates immediately
-and yields 'v' as its result. If control reaches the end of the body without
-encountering 'RETURN', the function’s return value is
-implementation-defined, commonly taken to be '0'.
+'name(expr1, expr2, ..., exprN)'. Arguments are evaluated left-to-right and
+must match the declared parameter types exactly; type mismatches raise a
+runtime error. The function body executes in a new environment (activation
+record) that closes over the defining environment. If a 'RETURN(v)'
+statement is executed, the function terminates immediately and yields 'v';
+the returned value must match the declared return type. If control reaches
+the end of the body without 'RETURN', the function returns a default value
+of the declared return type (0 for INT, "" for STR).
 
 Built-in operators and functions can be viewed as pre-defined functions
 provided by the runtime environment. User-defined functions share the same
@@ -426,15 +400,18 @@ exception.
 7. Variables and Memory Model
 -----------------------------
 
-A variable is created automatically upon first assignment, for example in
-'foo = 1101'. It exists until 'DEL(foo)' is executed, at which point its
-storage is freed and its name is removed from the environment. Referencing a
-variable that has never been assigned, or that has been deleted, is a
-runtime error.
+A variable is created only when it is first assigned with an explicit type
+annotation of the form 'TYPE : name = expression', where TYPE is 'INT' or
+'STR'. For example: 'INT: counter = 0' or 'STR : message = "hi"'. Subsequent
+assignments to the same name must match the declared type and may omit the
+type annotation ('counter = ADD(counter,1)'). Assigning to an undeclared name
+without a type annotation is a runtime error. A variable exists until
+'DEL(name)' is executed. Referencing a variable that has never been declared,
+or that has been deleted, is a runtime error.
 
-The language assumes at least a global environment mapping identifiers to
-integer values. Function calls create new environments for parameters and
-local variables, as described in Section 6.2; the precise details of name
+The language assumes at least a global typed environment mapping identifiers
+to (type, value) pairs. Function calls create new environments for parameters
+and local variables, as described in Section 6.2; the precise details of name
 resolution depend on the chosen scoping rules.
 
 
@@ -494,25 +471,27 @@ rewrite steps that led to the error for deterministic replay.
 GOTOPOINT and GOTO: Two additional control-flow primitives allow program
 execution to jump to a dynamically-registered program location. The
 statement form 'GOTOPOINT(n)' evaluates the expression 'n' and registers a
-gotopoint with that integer identifier at the point where the statement
-executes. Registration occurs at runtime when the 'GOTOPOINT' statement
-executes; subsequent execution (including execution within loops or after
-imports) may depend on whether the gotopoint has been registered.
+gotopoint with that identifier at the point where the statement executes.
+Registration occurs at runtime when the 'GOTOPOINT' statement executes;
+subsequent execution (including execution within loops or after imports) may
+depend on whether the gotopoint has been registered. Identifiers may be INT
+or STR; negative INT identifiers are invalid.
 
 The statement form 'GOTO(n)' evaluates 'n' at runtime and transfers
 execution to the previously-registered gotopoint whose identifier equals
-'n'. If no gotopoint with that identifier has been registered in a scope
-visible to the jump target, the interpreter raises a runtime error. GOTO
-may jump forward or backward relative to the target gotopoint; jumping to
-an unregistered identifier is an error. Gotopoints are not restricted to a
-single lexical block: they are visible across the containing function (or
-top-level program scope) in which they are defined. Implementations may
-choose to expose an even broader scope (for example, process-wide), but by
-default gotopoints registered within a function or at top-level are
-available to any GOTO executed within the same function or top-level code.
-This change enables cross-block jumps while preserving a clear containment
-model: a GOTO cannot target a gotopoint defined in an unrelated function or
-module unless the implementation explicitly exposes that mapping.
+'n', matching both type and value. If no gotopoint with that identifier has
+been registered in a scope visible to the jump target, the interpreter raises
+a runtime error. GOTO may jump forward or backward relative to the target
+gotopoint; jumping to an unregistered identifier is an error. Gotopoints are
+not restricted to a single lexical block: they are visible across the
+containing function (or top-level program scope) in which they are defined.
+Implementations may choose to expose an even broader scope (for example,
+process-wide), but by default gotopoints registered within a function or at
+top-level are available to any GOTO executed within the same function or
+top-level code. This change enables cross-block jumps while preserving a
+clear containment model: a GOTO cannot target a gotopoint defined in an
+unrelated function or module unless the implementation explicitly exposes
+that mapping.
 
 GOTO and GOTOPOINT are intended to be low-level primitives and their use
 can make programs harder to reason about. They are serialized in the state
@@ -765,10 +744,11 @@ statement signatures for fast lookup. Use this when you need the name or
 argument shape but don't want to re-read the full specification.
 
 Function / Operator Signatures (expression position)
-- 'INPUT()' or 'INPUT' : returns integer from input stream (0 for empty)
-- 'PRINT(a1, a2, ..., aN)' : prints arguments (side-effect), return value
-  discarded
-- 'ASSERT(a)' : crashes if 'a' is 0
+- 'INPUT()' or 'INPUT' : returns a STR from the input stream; use 'INT' to
+  coerce to an integer when needed
+- 'PRINT(a1, a2, ..., aN)' : prints INT/STR arguments (side-effect), return
+  value discarded
+- 'ASSERT(a)' : crashes if 'INT-style' truthiness of 'a' is 0
 - 'MAIN()' : 1 if executing in the primary program file, else 0 when in
   imported code
 - 'DEL(x)' : delete variable 'x' from environment
@@ -776,14 +756,17 @@ Function / Operator Signatures (expression position)
   code (default 0)
 - 'IMPORT(name)' : load and execute '<name>.asmln' beside the caller, sharing
   the caller's namespace
+- 'INT(x)' : STR -> INT using empty/01/other rules; INT passthrough
+- 'STR(x)' : INT -> binary-spelled STR; STR passthrough
 - Binary literal: optional leading '-' (spaces/tabs/CR allowed after the dash)
   then '{0,1}+'
+- String literal: '"' characters '"' (no escapes, no newlines)
 - 'EXIST(x)' : returns '1' if the identifier 'x' exists in the current
   environment (searching enclosing environments), else '0'. The argument must
   be an identifier; supplying an expression that is not a plain identifier is a
   runtime error.
 
-Arithmetic
+Arithmetic (INT only)
 - 'ADD(a, b)' : a + b
 - 'SUB(a, b)' : a - b
 - 'MUL(a, b)' : a * b
@@ -797,18 +780,12 @@ Arithmetic
 - 'LCM(a, b)' : least common multiple of a and b
 
 Bitwise / Boolean
-- 'BAND(a, b)' : bitwise AND
-- 'BOR(a, b)' : bitwise OR
-- 'BXOR(a, b)' : bitwise XOR
-- 'BNOT(a)' : bitwise complement
-- 'SHL(a, b)' : arithmetic shift-left of 'a' by 'b' bits (b >= 0)
-- 'SHR(a, b)' : arithmetic shift-right of 'a' by 'b' bits (b >= 0)
-- 'SLICE(a, hi, lo)' : inclusive bit-slice of 'a' from bit index 'hi' down to
-  'lo' (LSB index 0)
-- 'AND(a, b)' : Boolean AND -> 0 or 1
-- 'OR(a, b)' : Boolean OR -> 0 or 1
-- 'XOR(a, b)' : Boolean XOR -> 0 or 1
-- 'NOT(a)' : Boolean NOT -> 0 or 1
+- Bitwise INT-only: 'BAND', 'BOR', 'BXOR', 'BNOT', 'SHL', 'SHR'
+- 'SLICE(a, hi, lo)' : INT target -> bit-slice [hi:lo]; STR target ->
+  inclusive char-slice counting from the right (index 0 = last char); 'hi'
+  and 'lo' must be INT
+- Boolean operators ('AND', 'OR', 'XOR', 'NOT') treat empty strings as 0 and
+  non-empty strings as 1; always return INT 0/1
 
 Comparisons
 - 'EQ(a, b)' : 1 if a == b else 0
@@ -818,30 +795,33 @@ Comparisons
 - 'LTE(a, b)' : 1 if a <= b else 0
 
 Aggregates / Utilities
-- 'MAX(a1, ..., aN)' : max of arguments
-- 'MIN(a1, ..., aN)' : min of arguments
-- 'SUM(a1, ..., aN)' : sum of arguments
-- 'LEN(a1, ..., aN)' : number of arguments (N)
-- 'ALL(a1, ..., aN)' : 1 if all non-zero else 0
-- 'ANY(a1, ..., aN)' : 1 if any non-zero else 0
-- 'JOIN(a1, ..., aN)' : concatenate binary spellings of arguments; all must
-  share sign (all non-negative or all negative). If all negative, result is
-  the negation of the concatenation of absolute values.
-- 'PROD(a1, ..., aN)' : product of arguments
+- 'MAX(a1, ..., aN)' : INT -> numeric max; STR -> longest string; mixing INT
+  and STR is an error
+- 'MIN(a1, ..., aN)' : INT -> numeric min; STR -> shortest string; mixing INT
+  and STR is an error
+- 'SUM(a1, ..., aN)' : sum of INT arguments (INT only)
+- 'LEN(a1, ..., aN)' : number of arguments (N), accepts INT or STR
+- 'ALL(a1, ..., aN)' : Boolean AND (empty string -> false, non-empty -> true)
+- 'ANY(a1, ..., aN)' : Boolean OR (empty string -> false, non-empty -> true)
+- 'JOIN(a1, ..., aN)' : INT -> concatenate binary spellings with consistent
+  sign; STR -> concatenate strings; mixing INT and STR is an error
+- 'PROD(a1, ..., aN)' : product of INT arguments (INT only)
 
 Logarithms
 - 'LOG(a)' : floor(log2(a)) for a > 0
 - 'CLOG(a)' : ceil(log2(a)) for a > 0
 
 Control / Function / Statement Signatures (statement position)
-- Assignment: 'identifier = expression'
+- Assignment: 'TYPE : identifier = expression' on first use; subsequent
+  assignments omit TYPE but must match the original type
 - Block: '[ statement1 ... statementN ]' or '{ statement1 ... statementN }'
 - 'IF(condition)[ block ]'
   (optional 'ELSIF(condition)[ block ]' ... 'ELSE[ block ]')
 - 'WHILE(condition)[ block ]'
 - 'FOR(counter, target)[ block ]' : 'counter' initialized to 0, loop until
   counter >= target
-- 'FUNC name(arg1, arg2, ..., argN)[ block ]' : defines a function
+- 'FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R[ block ]' : typed function
+  definition with return type R
 - 'RETURN(a)' : return from function with value 'a'
 - 'BREAK(n)' : break out of the innermost 'n' enclosing loops; raises a
   runtime error if 'n' ≤ 0 or if 'n' is greater than the current loop nesting
@@ -850,16 +830,17 @@ Control / Function / Statement Signatures (statement position)
   and proceed to the next iteration; if used in the last iteration it acts
   like 'BREAK(1)'. Using 'CONTINUE()' outside of a loop is a runtime error.
 - 'GOTOPOINT(n)' : register a gotopoint with identifier 'n' at this statement's
-  location
+  location (identifier may be INT or STR)
   (n evaluated at runtime). Gotopoints are visible across the containing
   function or top-level scope rather than being restricted to a single
   lexical block.
 - 'GOTO(n)' : jump to a previously-registered gotopoint with identifier 'n'
-  within the same function or top-level scope; runtime error if not
+  (INT or STR) within the same function or top-level scope; runtime error if not
   registered in that scope
 
 Notes
-- All built-ins return integers. Boolean contexts treat 0 as false and
-  non-zero as true. Boolean operators return '0' or '1'.
+- Built-ins are statically typed. Boolean contexts treat INT 0 as false and
+  non-zero as true; STR is false when empty and true when non-empty unless a
+  rule explicitly converts via 'INT'.
 - Argument evaluation order: left-to-right.
 - User-defined functions use the same call syntax as built-ins.

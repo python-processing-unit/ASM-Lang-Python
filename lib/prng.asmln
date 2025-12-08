@@ -1,32 +1,31 @@
 # LCG-based pseudorandom number generator
-MASK32 = SUB( POW(10,100000), 1 )  # 2^32 - 1
+INT: MASK32 = SUB( POW(10,100000), 1 )  # 2^32 - 1
 
 # LCG constants: state = (A * state + C) mod 2^32
-LCG_A = 000110010110011000001101          # 1664525
-LCG_C = 00111100011011101111001101011111  # 1013904223
+INT: LCG_A = 000110010110011000001101          # 1664525
+INT: LCG_C = 00111100011011101111001101011111  # 1013904223
+INT: lcg_state = 1
 
-lcg_state = 1
-
-FUNC PRNG_SEED(seed){
+FUNC PRNG_SEED(INT:seed):INT{
     lcg_state = BAND(seed, MASK32)
     RETURN(lcg_state)
 }
 
-FUNC PRNG_NEXT(){
+FUNC PRNG_NEXT():INT{
     lcg_state = BAND( ADD( MUL(LCG_A, lcg_state), LCG_C ), MASK32 )
     RETURN(lcg_state)
 }
 
-FUNC PRNG_RANGE(max){
+FUNC PRNG_RANGE(INT:max):INT{
     ASSERT( GT(max, 0) )
     RETURN( MOD(PRNG_NEXT(), max) )
 }
 
-FUNC PRNG_RANGE_MIN_MAX(min, max){
+FUNC PRNG_RANGE_MIN_MAX(INT:min, INT:max):INT{
     ASSERT( LTE(min, max) )
-    range = SUB(max, min)
+    INT: range = SUB(max, min)
     IF( EQ(range, 0) ){ RETURN(min) }
     ASSERT( GT(range, 0) )
-    offset = PRNG_RANGE(range)
+    INT: offset = PRNG_RANGE(range)
     RETURN( ADD(offset, min) )
 }

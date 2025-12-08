@@ -2,9 +2,9 @@ IMPORT(collection)
 IMPORT(prng)
 IMPORT(csprng)
 
-FUNC RUN_TESTS(){
+FUNC RUN_TESTS():INT{
     # Collection basics
-    coll = collection.COL_EMPTY()
+    INT: coll = collection.COL_EMPTY()
     ASSERT( EQ( collection.GET_COUNT(coll), 0 ) )
 
     coll = collection.COL_PUSH(coll, 101)    # 5
@@ -12,35 +12,35 @@ FUNC RUN_TESTS(){
     coll = collection.COL_PUSH(coll, 1010)   # 10
     ASSERT( EQ( collection.GET_COUNT(coll), 11 ) )  # 3 items
 
-    v0 = collection.COL_GET(coll, 0)
+    INT: v0 = collection.COL_GET(coll, 0)
     ASSERT( EQ(v0, 101) )
 
-    v1 = collection.COL_GET(coll, 1)
+    INT: v1 = collection.COL_GET(coll, 1)
     ASSERT( EQ(v1, -11) )
 
-    coll2 = collection.COL_SET(coll, 1, 111)  # set index 1 -> 7
+    INT: coll2 = collection.COL_SET(coll, 1, 111)  # set index 1 -> 7
     ASSERT( EQ( collection.COL_GET(coll2, 1), 111 ) )
 
     # Pop returns (new_coll << 64bits) | value  (packed form used by COL_POP)
-    pop_res = collection.COL_POP(coll2)
-    last_val = MOD(pop_res, POW(10, 1000000))
+    INT: pop_res = collection.COL_POP(coll2)
+    INT: last_val = MOD(pop_res, POW(10, 1000000))
     ASSERT( EQ(last_val, 1010) )   # popped value == 10
 
-    new_coll = DIV(pop_res, POW(10, 1000000))
+    INT: new_coll = DIV(pop_res, POW(10, 1000000))
     ASSERT( EQ( collection.GET_COUNT(new_coll), 10 ) )  # count == 2
 
     # PRNG reproducibility (LCG)
     prng.PRNG_SEED(1010)   # seed = 10
-    a = prng.PRNG_NEXT()
+    INT: a = prng.PRNG_NEXT()
     prng.PRNG_SEED(1010)
-    b = prng.PRNG_NEXT()
+    INT: b = prng.PRNG_NEXT()
     ASSERT( EQ(a, b) )
 
     # CSPRNG reproducibility (ChaCha-based)
     csprng.CS_PRNG_SEED(101)  # seed = 5
-    x = csprng.CS_PRNG_NEXT()
+    INT: x = csprng.CS_PRNG_NEXT()
     csprng.CS_PRNG_SEED(101)
-    y = csprng.CS_PRNG_NEXT()
+    INT: y = csprng.CS_PRNG_NEXT()
     ASSERT( EQ(x, y) )
 
     # If we reach here all tests passed; print success code and return

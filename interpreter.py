@@ -4,7 +4,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from lexer import ASMError, ASMParseError, Lexer
 from parser import (
@@ -32,6 +32,16 @@ from parser import (
 )
 
 
+TYPE_INT = "INT"
+TYPE_STR = "STR"
+
+
+@dataclass
+class Value:
+    type: str
+    value: Union[int, str]
+
+
 class ASMRuntimeError(ASMError):
     """Raised for runtime faults."""
 
@@ -50,7 +60,7 @@ class ASMRuntimeError(ASMError):
 
 
 class ReturnSignal(Exception):
-    def __init__(self, value: int) -> None:
+    def __init__(self, value: Value) -> None:
         super().__init__(value)
         self.value = value
 
@@ -73,7 +83,7 @@ class ContinueSignal(Exception):
 
 
 class JumpSignal(Exception):
-    def __init__(self, target: int) -> None:
+    def __init__(self, target: Value) -> None:
         super().__init__(target)
         self.target = target
 
@@ -81,48 +91,71 @@ class JumpSignal(Exception):
 @dataclass
 class Environment:
     parent: Optional["Environment"] = None
-    values: Dict[str, int] = field(default_factory=dict)
+    values: Dict[str, Value] = field(default_factory=dict)
 
-    def set(self, name: str, value: int) -> None:
+    def _find_env(self, name: str) -> Optional["Environment"]:
         env: Optional[Environment] = self
         while env is not None:
             if name in env.values:
-                env.values[name] = value
-                return
+                return env
             env = env.parent
+        return None
+
+    def set(self, name: str, value: Value, declared_type: Optional[str] = None) -> None:
+        env = self._find_env(name)
+        if env is not None:
+            existing = env.values[name]
+            if declared_type and existing.type != declared_type:
+                raise ASMRuntimeError(
+                    f"Type mismatch for '{name}': previously declared as {existing.type}",
+                    rewrite_rule="ASSIGN",
+                )
+            if existing.type != value.type:
+                raise ASMRuntimeError(
+                    f"Type mismatch for '{name}': expected {existing.type} but got {value.type}",
+                    rewrite_rule="ASSIGN",
+                )
+            env.values[name] = value
+            return
+
+        if declared_type is None:
+            raise ASMRuntimeError(
+                f"Identifier '{name}' must be declared with a type before assignment",
+                rewrite_rule="ASSIGN",
+            )
+        if declared_type != value.type:
+            raise ASMRuntimeError(
+                f"Assigned value type {value.type} does not match declaration {declared_type}",
+                rewrite_rule="ASSIGN",
+            )
         self.values[name] = value
 
-    def get(self, name: str) -> int:
-        if name in self.values:
-            return self.values[name]
-        if self.parent is not None:
-            return self.parent.get(name)
+    def get(self, name: str) -> Value:
+        env = self._find_env(name)
+        if env is not None:
+            return env.values[name]
         raise ASMRuntimeError(f"Undefined identifier '{name}'", rewrite_rule="IDENT")
 
     def delete(self, name: str) -> None:
-        env: Optional[Environment] = self
-        while env is not None:
-            if name in env.values:
-                del env.values[name]
-                return
-            env = env.parent
+        env = self._find_env(name)
+        if env is not None:
+            del env.values[name]
+            return
         raise ASMRuntimeError(f"Cannot delete undefined identifier '{name}'", rewrite_rule="DEL")
 
     def has(self, name: str) -> bool:
-        if name in self.values:
-            return True
-        if self.parent is not None:
-            return self.parent.has(name)
-        return False
+        return self._find_env(name) is not None
 
-    def snapshot(self) -> Dict[str, int]:
-        return dict(self.values)
+    def snapshot(self) -> Dict[str, str]:
+        return {k: f"{v.type}:{v.value}" for k, v in self.values.items()}
 
 
 @dataclass
 class Function:
     name: str
     params: List[str]
+    param_types: List[str]
+    return_type: str
     body: Block
     closure: Environment
 
@@ -133,7 +166,7 @@ class Frame:
     env: Environment
     frame_id: str
     call_location: Optional[SourceLocation]
-    gotopoints: Dict[int, int] = field(default_factory=dict)
+    gotopoints: Dict[Any, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -143,7 +176,7 @@ class StateEntry:
     frame_id: Optional[str]
     source_location: Optional[SourceLocation]
     statement: Optional[str]
-    env_snapshot: Optional[Dict[str, int]]
+    env_snapshot: Optional[Dict[str, Any]]
     rewrite_record: Optional[Dict[str, Any]]
 
 
@@ -190,7 +223,7 @@ class StateLogger:
         return self.frame_last_entry.get(frame_id)
 
 
-BuiltinImpl = Callable[["Interpreter", List[int], List[Expression], Environment, SourceLocation], int]
+BuiltinImpl = Callable[["Interpreter", List[Value], List[Expression], Environment, SourceLocation], Value]
 
 
 @dataclass
@@ -214,43 +247,45 @@ def _as_bool(value: int) -> int:
 class Builtins:
     def __init__(self) -> None:
         self.table: Dict[str, BuiltinFunction] = {}
-        self._register_fixed("ADD", 2, lambda a, b: a + b)
-        self._register_fixed("SUB", 2, lambda a, b: a - b)
-        self._register_fixed("MUL", 2, lambda a, b: a * b)
-        self._register_fixed("DIV", 2, self._safe_div)
-        self._register_fixed("CDIV", 2, self._safe_cdiv)
-        self._register_fixed("MOD", 2, self._safe_mod)
-        self._register_fixed("POW", 2, self._safe_pow)
-        self._register_fixed("NEG", 1, lambda a: -a)
-        self._register_fixed("ABS", 1, abs)
-        self._register_fixed("GCD", 2, math.gcd)
-        self._register_fixed("LCM", 2, self._lcm)
-        self._register_fixed("BAND", 2, lambda a, b: a & b)
-        self._register_fixed("BOR", 2, lambda a, b: a | b)
-        self._register_fixed("BXOR", 2, lambda a, b: a ^ b)
-        self._register_fixed("BNOT", 1, lambda a: ~a)
-        self._register_fixed("SHL", 2, self._shift_left)
-        self._register_fixed("SHR", 2, self._shift_right)
-        self._register_fixed("SLICE", 3, self._slice)
-        self._register_fixed("AND", 2, lambda a, b: 1 if (_as_bool(a) and _as_bool(b)) else 0)
-        self._register_fixed("OR", 2, lambda a, b: 1 if (_as_bool(a) or _as_bool(b)) else 0)
-        self._register_fixed("XOR", 2, lambda a, b: 1 if (_as_bool(a) ^ _as_bool(b)) else 0)
-        self._register_fixed("NOT", 1, lambda a: 1 if a == 0 else 0)
-        self._register_fixed("EQ", 2, lambda a, b: 1 if a == b else 0)
-        self._register_fixed("GT", 2, lambda a, b: 1 if a > b else 0)
-        self._register_fixed("LT", 2, lambda a, b: 1 if a < b else 0)
-        self._register_fixed("GTE", 2, lambda a, b: 1 if a >= b else 0)
-        self._register_fixed("LTE", 2, lambda a, b: 1 if a <= b else 0)
-        self._register_variadic("SUM", 1, sum)
+        self._register_int_only("ADD", 2, lambda a, b: a + b)
+        self._register_int_only("SUB", 2, lambda a, b: a - b)
+        self._register_int_only("MUL", 2, lambda a, b: a * b)
+        self._register_int_only("DIV", 2, self._safe_div)
+        self._register_int_only("CDIV", 2, self._safe_cdiv)
+        self._register_int_only("MOD", 2, self._safe_mod)
+        self._register_int_only("POW", 2, self._safe_pow)
+        self._register_int_only("NEG", 1, lambda a: -a)
+        self._register_int_only("ABS", 1, abs)
+        self._register_int_only("GCD", 2, math.gcd)
+        self._register_int_only("LCM", 2, self._lcm)
+        self._register_int_only("BAND", 2, lambda a, b: a & b)
+        self._register_int_only("BOR", 2, lambda a, b: a | b)
+        self._register_int_only("BXOR", 2, lambda a, b: a ^ b)
+        self._register_int_only("BNOT", 1, lambda a: ~a)
+        self._register_int_only("SHL", 2, self._shift_left)
+        self._register_int_only("SHR", 2, self._shift_right)
+        self._register_custom("SLICE", 3, 3, self._slice)
+        self._register_custom("AND", 2, 2, self._and)
+        self._register_custom("OR", 2, 2, self._or)
+        self._register_custom("XOR", 2, 2, self._xor)
+        self._register_custom("NOT", 1, 1, self._not)
+        self._register_custom("EQ", 2, 2, self._eq)
+        self._register_int_only("GT", 2, lambda a, b: 1 if a > b else 0)
+        self._register_int_only("LT", 2, lambda a, b: 1 if a < b else 0)
+        self._register_int_only("GTE", 2, lambda a, b: 1 if a >= b else 0)
+        self._register_int_only("LTE", 2, lambda a, b: 1 if a <= b else 0)
+        self._register_variadic("SUM", 1, self._sum)
         self._register_variadic("PROD", 1, self._prod)
-        self._register_variadic("MAX", 1, max)
-        self._register_variadic("MIN", 1, min)
-        self._register_variadic("ANY", 1, lambda vals: 1 if any(_as_bool(v) for v in vals) else 0)
-        self._register_variadic("ALL", 1, lambda vals: 1 if all(_as_bool(v) for v in vals) else 0)
-        self._register_variadic("LEN", 0, lambda vals: len(vals))
+        self._register_variadic("MAX", 1, self._max)
+        self._register_variadic("MIN", 1, self._min)
+        self._register_variadic("ANY", 1, self._any)
+        self._register_variadic("ALL", 1, self._all)
+        self._register_variadic("LEN", 0, self._len)
         self._register_variadic("JOIN", 1, self._join)
-        self._register_fixed("LOG", 1, self._safe_log)
-        self._register_fixed("CLOG", 1, self._safe_clog)
+        self._register_int_only("LOG", 1, self._safe_log)
+        self._register_int_only("CLOG", 1, self._safe_clog)
+        self._register_custom("INT", 1, 1, self._int_op)
+        self._register_custom("STR", 1, 1, self._str_op)
         self._register_custom("MAIN", 0, 0, self._main)
         self._register_custom("IMPORT", 1, 1, self._import)
         self._register_custom("INPUT", 0, 0, self._input)
@@ -260,15 +295,16 @@ class Builtins:
         self._register_custom("EXIST", 1, 1, self._exist)
         self._register_custom("EXIT", 0, 1, self._exit)
 
-    def _register_fixed(self, name: str, arity: int, func: Callable[..., int]) -> None:
-        def impl(interpreter: "Interpreter", args: List[int], _: List[Expression], __: Environment, ___: SourceLocation) -> int:
-            return func(*args)
+    def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
+        def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+            ints = [self._expect_int(arg, name, location) for arg in args]
+            return Value(TYPE_INT, func(*ints))
 
         self.table[name] = BuiltinFunction(name=name, min_args=arity, max_args=arity, impl=impl)
 
-    def _register_variadic(self, name: str, min_args: int, func: Callable[[List[int]], int]) -> None:
-        def impl(interpreter: "Interpreter", args: List[int], _: List[Expression], __: Environment, ___: SourceLocation) -> int:
-            return func(args)
+    def _register_variadic(self, name: str, min_args: int, func: Callable[[List[Value], SourceLocation], Value]) -> None:
+        def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+            return func(args, location)
 
         self.table[name] = BuiltinFunction(name=name, min_args=min_args, max_args=None, impl=impl)
 
@@ -285,20 +321,52 @@ class Builtins:
         self,
         interpreter: "Interpreter",
         name: str,
-        args: List[int],
+        args: List[Value],
         arg_nodes: List[Expression],
         env: Environment,
         location: SourceLocation,
-    ) -> int:
+    ) -> Value:
         builtin = self.table.get(name)
         if builtin is None:
             raise ASMRuntimeError(f"Unknown function '{name}'", location=location)
         supplied = len(args)
         if supplied < builtin.min_args:
-            raise ASMRuntimeError(f"{name} expects at least {builtin.min_args} arguments", rewrite_rule=name)
+            raise ASMRuntimeError(f"{name} expects at least {builtin.min_args} arguments", rewrite_rule=name, location=location)
         if builtin.max_args is not None and supplied > builtin.max_args:
-            raise ASMRuntimeError(f"{name} expects at most {builtin.max_args} arguments", rewrite_rule=name)
+            raise ASMRuntimeError(f"{name} expects at most {builtin.max_args} arguments", rewrite_rule=name, location=location)
         return builtin.impl(interpreter, args, arg_nodes, env, location)
+
+    # Helpers
+    def _expect_int(self, value: Value, rule: str, location: SourceLocation) -> int:
+        if value.type != TYPE_INT:
+            raise ASMRuntimeError(f"{rule} expects integer arguments", location=location, rewrite_rule=rule)
+        assert isinstance(value.value, int)
+        return value.value
+
+    def _expect_str(self, value: Value, rule: str, location: SourceLocation) -> str:
+        if value.type != TYPE_STR:
+            raise ASMRuntimeError(f"{rule} expects string arguments", location=location, rewrite_rule=rule)
+        assert isinstance(value.value, str)
+        return value.value
+
+    def _as_bool_value(self, value: Value) -> int:
+        if value.type == TYPE_INT:
+            return 0 if value.value == 0 else 1
+        if value.type == TYPE_STR:
+            return 0 if value.value == "" else 1
+        return 0
+
+    def _condition_from_value(self, value: Value) -> int:
+        if value.type == TYPE_INT:
+            return value.value  # type: ignore[return-value]
+        if value.type == TYPE_STR:
+            text = value.value  # type: ignore[assignment]
+            if text == "":
+                return 0
+            if set(text).issubset({"0", "1"}):
+                return int(text, 2)
+            return 1
+        return 0
 
     def _safe_div(self, a: int, b: int) -> int:
         if b == 0:
@@ -338,21 +406,139 @@ class Builtins:
             return 0
         return abs(a * b) // math.gcd(a, b)
 
-    def _prod(self, values: List[int]) -> int:
-        result = 1
-        for value in values:
-            result *= value
-        return result
+    # Variadic helpers
+    def _sum(self, values: List[Value], location: SourceLocation) -> Value:
+        ints = [self._expect_int(v, "SUM", location) for v in values]
+        return Value(TYPE_INT, sum(ints))
 
-    def _join(self, values: List[int]) -> int:
-        if any(value < 0 for value in values):
-            if not all(value < 0 for value in values):
+    def _prod(self, values: List[Value], location: SourceLocation) -> Value:
+        ints = [self._expect_int(v, "PROD", location) for v in values]
+        result = 1
+        for val in ints:
+            result *= val
+        return Value(TYPE_INT, result)
+
+    def _max(self, values: List[Value], location: SourceLocation) -> Value:
+        if not values:
+            raise ASMRuntimeError("MAX requires at least one argument", rewrite_rule="MAX")
+        first_type = values[0].type
+        if any(v.type != first_type for v in values):
+            raise ASMRuntimeError("MAX cannot mix integers and strings", rewrite_rule="MAX", location=location)
+        if first_type == TYPE_INT:
+            ints = [self._expect_int(v, "MAX", location) for v in values]
+            return Value(TYPE_INT, max(ints))
+        strs = [self._expect_str(v, "MAX", location) for v in values]
+        longest = max(strs, key=len)
+        return Value(TYPE_STR, longest)
+
+    def _min(self, values: List[Value], location: SourceLocation) -> Value:
+        if not values:
+            raise ASMRuntimeError("MIN requires at least one argument", rewrite_rule="MIN")
+        first_type = values[0].type
+        if any(v.type != first_type for v in values):
+            raise ASMRuntimeError("MIN cannot mix integers and strings", rewrite_rule="MIN", location=location)
+        if first_type == TYPE_INT:
+            ints = [self._expect_int(v, "MIN", location) for v in values]
+            return Value(TYPE_INT, min(ints))
+        strs = [self._expect_str(v, "MIN", location) for v in values]
+        shortest = min(strs, key=len)
+        return Value(TYPE_STR, shortest)
+
+    def _any(self, values: List[Value], _: SourceLocation) -> Value:
+        return Value(TYPE_INT, 1 if any(self._as_bool_value(v) for v in values) else 0)
+
+    def _all(self, values: List[Value], _: SourceLocation) -> Value:
+        return Value(TYPE_INT, 1 if all(self._as_bool_value(v) for v in values) else 0)
+
+    def _len(self, values: List[Value], _: SourceLocation) -> Value:
+        return Value(TYPE_INT, len(values))
+
+    def _join(self, values: List[Value], location: SourceLocation) -> Value:
+        if not values:
+            raise ASMRuntimeError("JOIN requires at least one argument", rewrite_rule="JOIN")
+        first_type = values[0].type
+        if any(v.type != first_type for v in values):
+            raise ASMRuntimeError("JOIN cannot mix integers and strings", rewrite_rule="JOIN", location=location)
+        if first_type == TYPE_STR:
+            parts = [self._expect_str(v, "JOIN", location) for v in values]
+            return Value(TYPE_STR, "".join(parts))
+
+        ints = [self._expect_int(v, "JOIN", location) for v in values]
+        if any(val < 0 for val in ints):
+            if not all(val < 0 for val in ints):
                 raise ASMRuntimeError("JOIN arguments must not mix positive and negative values", rewrite_rule="JOIN")
-            abs_vals = [abs(v) for v in values]
+            abs_vals = [abs(v) for v in ints]
             bits = "".join("0" if v == 0 else format(v, "b") for v in abs_vals)
-            return -int(bits or "0", 2)
-        bits = "".join("0" if value == 0 else format(value, "b") for value in values)
-        return int(bits or "0", 2)
+            return Value(TYPE_INT, -int(bits or "0", 2))
+        bits = "".join("0" if v == 0 else format(v, "b") for v in ints)
+        return Value(TYPE_INT, int(bits or "0", 2))
+
+    # Boolean-like operators treating strings via emptiness
+    def _and(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        a, b = args
+        return Value(TYPE_INT, 1 if (self._as_bool_value(a) and self._as_bool_value(b)) else 0)
+
+    def _or(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        a, b = args
+        return Value(TYPE_INT, 1 if (self._as_bool_value(a) or self._as_bool_value(b)) else 0)
+
+    def _xor(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        a, b = args
+        return Value(TYPE_INT, 1 if (self._as_bool_value(a) ^ self._as_bool_value(b)) else 0)
+
+    def _not(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
+        return Value(TYPE_INT, 1 if self._as_bool_value(args[0]) == 0 else 0)
+
+    def _eq(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
+        a, b = args
+        if a.type != b.type:
+            return Value(TYPE_INT, 0)
+        return Value(TYPE_INT, 1 if a.value == b.value else 0)
+
+    def _slice(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        target, hi_val, lo_val = args
+        hi = self._expect_int(hi_val, "SLICE", location)
+        lo = self._expect_int(lo_val, "SLICE", location)
+        if hi < lo:
+            raise ASMRuntimeError("SLICE: hi must be >= lo", rewrite_rule="SLICE", location=location)
+        if hi < 0 or lo < 0:
+            raise ASMRuntimeError("SLICE: indices must be non-negative", rewrite_rule="SLICE", location=location)
+        if target.type == TYPE_INT:
+            width = hi - lo + 1
+            if width <= 0:
+                return Value(TYPE_INT, 0)
+            mask = (1 << (hi + 1)) - 1
+            result = (self._expect_int(target, "SLICE", location) & mask) >> lo
+            return Value(TYPE_INT, result)
+        if target.type != TYPE_STR:
+            raise ASMRuntimeError("SLICE target must be int or string", rewrite_rule="SLICE", location=location)
+        text = self._expect_str(target, "SLICE", location)
+        length = len(text)
+        start = length - 1 - hi
+        end = length - 1 - lo
+        if start < 0 or end < 0 or start > end:
+            raise ASMRuntimeError("SLICE indices out of range for string", rewrite_rule="SLICE", location=location)
+        return Value(TYPE_STR, text[start : end + 1])
+
+    def _int_op(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        val = args[0]
+        if val.type == TYPE_INT:
+            return val
+        text = self._expect_str(val, "INT", location)
+        if text == "":
+            return Value(TYPE_INT, 0)
+        if set(text).issubset({"0", "1"}):
+            return Value(TYPE_INT, int(text, 2))
+        return Value(TYPE_INT, 1)
+
+    def _str_op(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        val = args[0]
+        if val.type == TYPE_STR:
+            return val
+        number = self._expect_int(val, "STR", location)
+        if number < 0:
+            return Value(TYPE_STR, "-" + format(-number, "b"))
+        return Value(TYPE_STR, format(number, "b"))
 
     def _safe_log(self, value: int) -> int:
         if value <= 0:
@@ -369,24 +555,24 @@ class Builtins:
     def _main(
         self,
         interpreter: "Interpreter",
-        _: List[int],
+        _: List[Value],
         __: List[Expression],
         ___: Environment,
         location: SourceLocation,
-    ) -> int:
+    ) -> Value:
         root = interpreter.entry_filename
         if root == "<string>":
-            return 1 if location.file == "<string>" else 0
-        return 1 if os.path.abspath(location.file) == root else 0
+            return Value(TYPE_INT, 1 if location.file == "<string>" else 0)
+        return Value(TYPE_INT, 1 if os.path.abspath(location.file) == root else 0)
 
     def _import(
         self,
         interpreter: "Interpreter",
-        _: List[int],
+        _: List[Value],
         arg_nodes: List[Expression],
         env: Environment,
         location: SourceLocation,
-    ) -> int:
+    ) -> Value:
         if len(arg_nodes) != 1 or not isinstance(arg_nodes[0], Identifier):
             raise ASMRuntimeError("IMPORT expects module name identifier", location=location, rewrite_rule="IMPORT")
 
@@ -427,6 +613,8 @@ class Builtins:
                 interpreter.functions[dotted_name] = Function(
                     name=dotted_name,
                     params=fn.params,
+                    param_types=fn.param_types,
+                    return_type=fn.return_type,
                     body=fn.body,
                     closure=fn.closure,
                 )
@@ -435,75 +623,72 @@ class Builtins:
                 interpreter.functions[dotted_name] = Function(
                     name=dotted_name,
                     params=fn.params,
+                    param_types=fn.param_types,
+                    return_type=fn.return_type,
                     body=fn.body,
                     closure=module_env,
                 )
 
-        for k, v in module_env.snapshot().items():
+        for k, v in module_env.values.items():
             dotted = f"{module_name}.{k}"
-            env.set(dotted, v)
-        return 0
-
-    def _slice(self, a: int, hi: int, lo: int) -> int:
-        if hi < lo:
-            raise ASMRuntimeError("SLICE: hi must be >= lo", rewrite_rule="SLICE")
-        if lo < 0 or hi < 0:
-            raise ASMRuntimeError("SLICE: bit indices must be non-negative", rewrite_rule="SLICE")
-        width = hi - lo + 1
-        if width <= 0:
-            return 0
-        mask = (1 << (hi + 1)) - 1
-        return (a & mask) >> lo
+            env.set(dotted, v, declared_type=v.type)
+        return Value(TYPE_INT, 0)
 
     def _input(
         self,
         interpreter: "Interpreter",
-        args: List[int],
+        args: List[Value],
         __: List[Expression],
         ___: Environment,
         ____: SourceLocation,
-    ) -> int:
+    ) -> Value:
         text = interpreter.input_provider()
         interpreter.io_log.append({"event": "INPUT", "text": text})
-        if text == "":
-            return 0
-        if set(text).issubset({"0", "1"}):
-            return int(text, 2)
-        return 1
+        return Value(TYPE_STR, text)
 
     def _print(
         self,
         interpreter: "Interpreter",
-        args: List[int],
+        args: List[Value],
         __: List[Expression],
         ___: Environment,
         ____: SourceLocation,
-    ) -> int:
-        text = " ".join(("-" + format(-arg, "b")) if arg < 0 else format(arg, "b") for arg in args)
+    ) -> Value:
+        rendered: List[str] = []
+        for arg in args:
+            if arg.type == TYPE_INT:
+                number = self._expect_int(arg, "PRINT", ____)
+                rendered.append(("-" + format(-number, "b")) if number < 0 else format(number, "b"))
+            elif arg.type == TYPE_STR:
+                rendered.append(arg.value)  # type: ignore[arg-type]
+            else:
+                rendered.append(str(arg.value))
+        text = " ".join(rendered)
         interpreter.output_sink(text)
-        interpreter.io_log.append({"event": "PRINT", "values": args[:]})
-        return 0
+        interpreter.io_log.append({"event": "PRINT", "values": [arg.value for arg in args]})
+        return Value(TYPE_INT, 0)
 
     def _assert(
         self,
         interpreter: "Interpreter",
-        args: List[int],
+        args: List[Value],
         __: List[Expression],
         ___: Environment,
         location: SourceLocation,
-    ) -> int:
-        if args[0] == 0:
+    ) -> Value:
+        cond = self._condition_from_value(args[0]) if args else 0
+        if cond == 0:
             raise ASMRuntimeError("Assertion failed", location=location, rewrite_rule="ASSERT")
-        return 1
+        return Value(TYPE_INT, 1)
 
     def _delete(
         self,
         interpreter: "Interpreter",
-        args: List[int],
+        args: List[Value],
         arg_nodes: List[Expression],
         env: Environment,
         location: SourceLocation,
-    ) -> int:
+    ) -> Value:
         if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
             raise ASMRuntimeError("DEL expects identifier", location=location, rewrite_rule="DEL")
         name = arg_nodes[0].name
@@ -512,30 +697,31 @@ class Builtins:
         except ASMRuntimeError as err:
             err.location = location
             raise
-        return 0
+        return Value(TYPE_INT, 0)
 
     def _exist(
         self,
         interpreter: "Interpreter",
-        args: List[int],
+        args: List[Value],
         arg_nodes: List[Expression],
         env: Environment,
         location: SourceLocation,
-    ) -> int:
+    ) -> Value:
         if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
             raise ASMRuntimeError("EXIST requires an identifier argument", location=location, rewrite_rule="EXIST")
         name = arg_nodes[0].name
-        return 1 if env.has(name) else 0
+        return Value(TYPE_INT, 1 if env.has(name) else 0)
 
     def _exit(
         self,
         interpreter: "Interpreter",
-        args: List[int],
+        args: List[Value],
         __: List[Expression],
         ___: Environment,
         ____: SourceLocation,
-    ) -> int:
-        code = args[0] if args else 0
+    ) -> Value:
+        code_val = args[0] if args else Value(TYPE_INT, 0)
+        code = self._expect_int(code_val, "EXIT", ____)
         interpreter.io_log.append({"event": "EXIT", "code": code})
         raise ExitSignal(code)
 
@@ -598,20 +784,35 @@ class Interpreter:
             if isinstance(statement, GotopointStatement):
                 self._log_step(rule=statement.__class__.__name__, location=statement.location)
                 gid = self._evaluate_expression(statement.expression, env)
-                if gid < 0:
-                    raise ASMRuntimeError("GOTOPOINT id must be non-negative", location=statement.location, rewrite_rule="GOTOPOINT")
-                gotopoints[gid] = i
+                if gid.type == TYPE_INT:
+                    if gid.value < 0:
+                        raise ASMRuntimeError(
+                            "GOTOPOINT id must be non-negative",
+                            location=statement.location,
+                            rewrite_rule="GOTOPOINT",
+                        )
+                    key = (TYPE_INT, gid.value)
+                elif gid.type == TYPE_STR:
+                    key = (TYPE_STR, gid.value)
+                else:
+                    raise ASMRuntimeError(
+                        "GOTOPOINT expects int or string identifier",
+                        location=statement.location,
+                        rewrite_rule="GOTOPOINT",
+                    )
+                gotopoints[key] = i
                 i += 1
                 continue
             try:
                 self._execute_statement(statement, env)
             except JumpSignal as js:
                 target = js.target
-                if target not in gotopoints:
+                key = (target.type, target.value)
+                if key not in gotopoints:
                     raise ASMRuntimeError(
-                        f"GOTO to undefined gotopoint '{target}'", location=statement.location, rewrite_rule="GOTO"
+                        f"GOTO to undefined gotopoint '{target.value}'", location=statement.location, rewrite_rule="GOTO"
                     )
-                i = gotopoints[target]
+                i = gotopoints[key]
                 continue
             i += 1
 
@@ -622,8 +823,8 @@ class Interpreter:
                 raise ASMRuntimeError(
                     f"Identifier '{statement.target}' already bound as function", location=statement.location, rewrite_rule="ASSIGN"
                 )
-            value: int = self._evaluate_expression(statement.expression, env)
-            env.set(statement.target, value)
+            value = self._evaluate_expression(statement.expression, env)
+            env.set(statement.target, value, declared_type=statement.declared_type)
             return
         if isinstance(statement, ExpressionStatement):
             self._evaluate_expression(statement.expression, env)
@@ -642,16 +843,26 @@ class Interpreter:
                 raise ASMRuntimeError(
                     f"Function name '{statement.name}' conflicts with built-in", location=statement.location
                 )
-            self.functions[statement.name] = Function(name=statement.name, params=statement.params, body=statement.body, closure=env)
+            param_types = [ptype for ptype, _ in statement.params]
+            param_names = [pname for _, pname in statement.params]
+            self.functions[statement.name] = Function(
+                name=statement.name,
+                params=param_names,
+                param_types=param_types,
+                return_type=statement.return_type,
+                body=statement.body,
+                closure=env,
+            )
             return
         if isinstance(statement, ReturnStatement):
             frame: Frame = self.call_stack[-1]
             if frame.name == "<top-level>":
                 raise ASMRuntimeError("RETURN outside of function", location=statement.location, rewrite_rule="RETURN")
-            value: int = self._evaluate_expression(statement.expression, env) if statement.expression else 0
+            value = self._evaluate_expression(statement.expression, env) if statement.expression else Value(TYPE_INT, 0)
             raise ReturnSignal(value)
         if isinstance(statement, BreakStatement):
-            count = self._evaluate_expression(statement.expression, env)
+            count_val = self._evaluate_expression(statement.expression, env)
+            count = self._expect_int(count_val, "BREAK", statement.location)
             if count <= 0:
                 raise ASMRuntimeError("BREAK count must be > 0", location=statement.location, rewrite_rule="BREAK")
             raise BreakSignal(count)
@@ -664,18 +875,18 @@ class Interpreter:
         raise ASMRuntimeError("Unsupported statement", location=statement.location)
 
     def _execute_if(self, statement: IfStatement, env: Environment) -> None:
-        if self._evaluate_expression(statement.condition, env) != 0:
+        if self._condition_int(self._evaluate_expression(statement.condition, env), statement.location) != 0:
             self._execute_block(statement.then_block.statements, env)
             return
         for branch in statement.elifs:
-            if self._evaluate_expression(branch.condition, env) != 0:
+            if self._condition_int(self._evaluate_expression(branch.condition, env), branch.condition.location) != 0:
                 self._execute_block(branch.block.statements, env)
                 return
         if statement.else_block:
             self._execute_block(statement.else_block.statements, env)
 
     def _execute_while(self, statement: WhileStatement, env: Environment) -> None:
-        while self._evaluate_expression(statement.condition, env) != 0:
+        while self._condition_int(self._evaluate_expression(statement.condition, env), statement.condition.location) != 0:
             try:
                 self._execute_block(statement.block.statements, env)
             except BreakSignal as bs:
@@ -686,7 +897,8 @@ class Interpreter:
             except ContinueSignal:
                 # Evaluate condition now to determine if there will be another iteration.
                 try:
-                    next_cond = self._evaluate_expression(statement.condition, env)
+                    next_cond_val = self._evaluate_expression(statement.condition, env)
+                    next_cond = self._condition_int(next_cond_val, statement.condition.location)
                 except ASMRuntimeError:
                     # Propagate evaluation errors
                     raise
@@ -697,9 +909,10 @@ class Interpreter:
                 return
 
     def _execute_for(self, statement: ForStatement, env: Environment) -> None:
-        target: int = self._evaluate_expression(statement.target_expr, env)
-        env.set(statement.counter, 0)
-        while env.get(statement.counter) < target:
+        target_val = self._evaluate_expression(statement.target_expr, env)
+        target = self._expect_int(target_val, "FOR", statement.location)
+        env.set(statement.counter, Value(TYPE_INT, 0), declared_type=TYPE_INT)
+        while self._expect_int(env.get(statement.counter), "FOR", statement.location) < target:
             try:
                 self._execute_block(statement.block.statements, env)
             except BreakSignal as bs:
@@ -709,48 +922,65 @@ class Interpreter:
                 return
             except ContinueSignal:
                 # For FOR loops, increment the counter and decide whether to continue
-                current = env.get(statement.counter)
+                current = self._expect_int(env.get(statement.counter), "FOR", statement.location)
                 if current + 1 < target:
-                    env.set(statement.counter, current + 1)
+                    env.set(statement.counter, Value(TYPE_INT, current + 1))
                     continue
                 # no further iterations -> behave like BREAK(1)
                 return
-            env.set(statement.counter, env.get(statement.counter) + 1)
+            env.set(statement.counter, Value(TYPE_INT, self._expect_int(env.get(statement.counter), "FOR", statement.location) + 1))
 
-    def _evaluate_expression(self, expression: Expression, env: Environment) -> int:
+    def _condition_int(self, value: Value, location: Optional[SourceLocation]) -> int:
+        if value.type == TYPE_INT:
+            return value.value  # type: ignore[return-value]
+        if value.type == TYPE_STR:
+            text = value.value  # type: ignore[assignment]
+            if text == "":
+                return 0
+            if set(text).issubset({"0", "1"}):
+                return int(text, 2)
+            return 1
+        raise ASMRuntimeError("Unsupported type in condition", location=location)
+
+    def _expect_int(self, value: Value, rule: str, location: Optional[SourceLocation]) -> int:
+        if value.type != TYPE_INT:
+            raise ASMRuntimeError(f"{rule} expects integer value", location=location, rewrite_rule=rule)
+        return value.value  # type: ignore[return-value]
+
+    def _evaluate_expression(self, expression: Expression, env: Environment) -> Value:
         if isinstance(expression, Literal):
-            return expression.value
+            return Value(expression.literal_type, expression.value)
         if isinstance(expression, Identifier):
             try:
                 return env.get(expression.name)
             except ASMRuntimeError as err:
                 err.location = expression.location
                 if expression.name == "INPUT":
-                    result: int = self.builtins.invoke(self, "INPUT", [], [], env, expression.location)
-                    self._log_step(rule="INPUT", location=expression.location, extra={"args": [], "result": result})
+                    result = self.builtins.invoke(self, "INPUT", [], [], env, expression.location)
+                    self._log_step(rule="INPUT", location=expression.location, extra={"args": [], "result": result.value})
                     return result
                 raise
         if isinstance(expression, CallExpression):
             if expression.name == "IMPORT":
                 module_label = expression.args[0].name if (expression.args and isinstance(expression.args[0], Identifier)) else None
-                dummy_args: List[int] = [0] * len(expression.args)
+                dummy_args: List[Value] = [Value(TYPE_INT, 0)] * len(expression.args)
                 try:
-                    result: int = self.builtins.invoke(self, expression.name, dummy_args, expression.args, env, expression.location)
+                    result = self.builtins.invoke(self, expression.name, dummy_args, expression.args, env, expression.location)
                 except ASMRuntimeError:
                     self._log_step(rule="IMPORT", location=expression.location, extra={"module": module_label, "status": "error"})
                     raise
-                self._log_step(rule="IMPORT", location=expression.location, extra={"module": module_label, "result": result})
+                self._log_step(rule="IMPORT", location=expression.location, extra={"module": module_label, "result": result.value})
                 return result
             if expression.name in ("DEL", "EXIST"):
-                dummy_args: List[int] = [0] * len(expression.args)
+                dummy_args: List[Value] = [Value(TYPE_INT, 0)] * len(expression.args)
                 try:
-                    result: int = self.builtins.invoke(self, expression.name, dummy_args, expression.args, env, expression.location)
+                    result = self.builtins.invoke(self, expression.name, dummy_args, expression.args, env, expression.location)
                 except ASMRuntimeError:
                     self._log_step(rule=expression.name, location=expression.location, extra={"args": None, "status": "error"})
                     raise
-                self._log_step(rule=expression.name, location=expression.location, extra={"args": None, "result": result})
+                self._log_step(rule=expression.name, location=expression.location, extra={"args": None, "result": result.value})
                 return result
-            args: List[int] = []
+            args: List[Value] = []
             for arg in expression.args:
                 args.append(self._evaluate_expression(arg, env))
             func_name: Optional[str] = None
@@ -765,38 +995,52 @@ class Interpreter:
                         if candidate in self.functions:
                             func_name = candidate
             if func_name is not None:
-                self._log_step(rule="CALL", location=expression.location, extra={"function": func_name, "args": args})
+                self._log_step(rule="CALL", location=expression.location, extra={"function": func_name, "args": [a.value for a in args]})
                 return self._call_user_function(self.functions[func_name], args, expression.location)
             try:
-                result: int = self.builtins.invoke(self, expression.name, args, expression.args, env, expression.location)
+                result = self.builtins.invoke(self, expression.name, args, expression.args, env, expression.location)
             except ASMRuntimeError:
-                self._log_step(rule=expression.name, location=expression.location, extra={"args": args, "status": "error"})
+                self._log_step(rule=expression.name, location=expression.location, extra={"args": [a.value for a in args], "status": "error"})
                 raise
-            self._log_step(rule=expression.name, location=expression.location, extra={"args": args, "result": result})
+            self._log_step(rule=expression.name, location=expression.location, extra={"args": [a.value for a in args], "result": result.value})
             return result
         raise ASMRuntimeError("Unsupported expression", location=expression.location)
 
-    def _call_user_function(self, function: Function, args: List[int], call_location: SourceLocation) -> int:
+    def _call_user_function(self, function: Function, args: List[Value], call_location: SourceLocation) -> Value:
         if len(args) != len(function.params):
             raise ASMRuntimeError(
                 f"Function {function.name} expects {len(function.params)} arguments but received {len(args)}",
                 location=call_location,
             )
         env = Environment(parent=function.closure)
-        for param, value in zip(function.params, args):
-            env.set(param, value)
+        for param_name, param_type, arg in zip(function.params, function.param_types, args):
+            if arg.type != param_type:
+                raise ASMRuntimeError(
+                    f"Argument for '{param_name}' expected {param_type} but got {arg.type}",
+                    location=call_location,
+                    rewrite_rule=function.name,
+                )
+            env.set(param_name, arg, declared_type=param_type)
         frame = self._new_frame(function.name, env, call_location)
         self.call_stack.append(frame)
         try:
             self._execute_block(function.body.statements, env)
         except ReturnSignal as signal:
             self.call_stack.pop()
+            if signal.value.type != function.return_type:
+                raise ASMRuntimeError(
+                    f"Function {function.name} must return {function.return_type} but got {signal.value.type}",
+                    location=call_location,
+                    rewrite_rule=function.name,
+                )
             return signal.value
         except ASMRuntimeError:
             raise
         else:
             self.call_stack.pop()
-            return 0
+            if function.return_type == TYPE_INT:
+                return Value(TYPE_INT, 0)
+            return Value(TYPE_STR, "")
 
     def _new_frame(self, name: str, env: Environment, call_location: Optional[SourceLocation]) -> Frame:
         frame_id = f"f_{self.frame_counter:04d}"
