@@ -19,7 +19,7 @@ class Token:
     column: int
 
 
-KEYWORDS = {"IF", "ELSIF", "ELSE", "WHILE", "FOR", "FUNC", "RETURN", "BREAK", "GOTO", "GOTOPOINT"}
+KEYWORDS = {"IF", "ELSIF", "ELSE", "WHILE", "FOR", "FUNC", "RETURN", "BREAK", "GOTO", "GOTOPOINT", "CONTINUE"}
 SYMBOLS = {
     "(": "LPAREN",
     ")": "RPAREN",
@@ -55,23 +55,8 @@ class Lexer:
                 _advance()
                 continue
             if ch == "^":
-                if self.index + 1 >= len(self.text):
-                    raise ASMParseError(
-                        f"Invalid line continuation '^' at {self.filename}:{self.line}:{self.column}"
-                    )
-                next_ch = self.text[self.index + 1]
-                if next_ch == "\n":
-                    _advance()
-                    _advance()
-                    continue
-                if next_ch == "\r":
-                    _advance()
-                    if not self._eof and self._peek() == "\n":
-                        _advance()
-                    continue
-                raise ASMParseError(
-                    f"Invalid line continuation '^' not followed by newline at {self.filename}:{self.line}:{self.column}"
-                )
+                self._consume_line_continuation()
+                continue
             if ch == "\n":
                 tokens.append(Token("NEWLINE", "\n", self.line, self.column))
                 _advance()
@@ -119,9 +104,16 @@ class Lexer:
 
     def _consume_binary_digits(self) -> str:
         digits: List[str] = []
-        while not self._eof and self._peek() in "01":
-            digits.append(self._peek())
-            self._advance()
+        while not self._eof:
+            ch = self._peek()
+            if ch in "01":
+                digits.append(ch)
+                self._advance()
+                continue
+            if ch == "^":
+                self._consume_line_continuation()
+                continue
+            break
         return "".join(digits)
 
     def _consume_identifier(self) -> Token:
@@ -131,9 +123,16 @@ class Lexer:
                 f"Identifiers must not start with '0' or '1' at {self.filename}:{line}:{col}"
             )
         chars: List[str] = []
-        while not self._eof and self._is_identifier_part(self._peek()):
-            chars.append(self._peek())
-            self._advance()
+        while not self._eof:
+            ch = self._peek()
+            if self._is_identifier_part(ch):
+                chars.append(ch)
+                self._advance()
+                continue
+            if ch == "^":
+                self._consume_line_continuation()
+                continue
+            break
         value = "".join(chars)
         token_type: str = value if value in KEYWORDS else "IDENT"
         return Token(token_type, value, line, col)
@@ -142,7 +141,27 @@ class Lexer:
         return (ch == "_") or ("A" <= ch <= "Z") or ("a" <= ch <= "z")
 
     def _is_identifier_part(self, ch: str) -> bool:
-        return (ch == "_") or ("A" <= ch <= "Z") or ("a" <= ch <= "z") or ("0" <= ch <= "9") or (ch == ".")
+        return (ch == "_") or ("A" <= ch <= "Z") or ("a" <= ch <= "z") or (ch in "01")
+
+    def _consume_line_continuation(self) -> None:
+        if self.index + 1 >= len(self.text):
+            raise ASMParseError(
+                f"Invalid line continuation '^' at {self.filename}:{self.line}:{self.column}"
+            )
+        ch1 = self.text[self.index + 1]
+        if ch1 == "\n":
+            self._advance()
+            self._advance()
+            return
+        if ch1 == "\r":
+            self._advance()
+            self._advance()
+            if self.index < len(self.text) and self.text[self.index] == "\n":
+                self._advance()
+            return
+        raise ASMParseError(
+            f"Invalid line continuation '^' not followed by newline at {self.filename}:{self.line}:{self.column}"
+        )
 
     @property
     def _eof(self) -> bool:

@@ -24,14 +24,14 @@ ch_counter = 0
 ch_buf = collection.COL_EMPTY()
 ch_buf_pos = 10000  # 16 -> force refill
 
-FUNC ROTL32(x, n)[
+FUNC ROTL32(x, n){
     x32 = BAND(x, MASK32)
     left = BAND( SHL(x32, n), MASK32 )
     right = DIV( x32, POW(10, SUB(100000, n)) )
     RETURN( BOR(left, right) )
-]
+}
 
-FUNC QR(a, b, c, d)[
+FUNC QR(a, b, c, d){
     a = BAND( ADD(a, b), MASK32 )
     d = ROTL32( BXOR(d, a), 10000 )   # 16
     c = BAND( ADD(c, d), MASK32 )
@@ -46,9 +46,9 @@ FUNC QR(a, b, c, d)[
     coll = collection.COL_PUSH(coll, c)
     coll = collection.COL_PUSH(coll, d)
     RETURN(coll)
-]
+}
 
-FUNC CHACHA_BLOCK()[
+FUNC CHACHA_BLOCK(){
     x0 = CH_CONST0
     x1 = CH_CONST1
     x2 = CH_CONST2
@@ -66,7 +66,7 @@ FUNC CHACHA_BLOCK()[
     x14 = ch_nonce1
     x15 = ch_nonce2
     i = 0
-    WHILE( LT(i, 1010) )[  # 10 double-rounds
+    WHILE( LT(i, 1010) ){  # 10 double-rounds
         qr = QR(x0, x4, x8,  x12)
         x0 = collection.COL_GET(qr,0)
         x4 = collection.COL_GET(qr,1)
@@ -110,7 +110,7 @@ FUNC CHACHA_BLOCK()[
         x14 = collection.COL_GET(qr,11)
 
         i = ADD(i, 1)
-    ]
+    }
 
     x0 = BAND( ADD(x0, CH_CONST0), MASK32 )
     x1 = BAND( ADD(x1, CH_CONST1), MASK32 )
@@ -147,68 +147,68 @@ FUNC CHACHA_BLOCK()[
     out = collection.COL_PUSH(out, x14)
     out = collection.COL_PUSH(out, x15)
     RETURN(out)
-]
+}
 
-FUNC REFILL_BUF()[
+FUNC REFILL_BUF(){
     ch_buf = CHACHA_BLOCK()
     ch_buf_pos = 0
     ch_counter = BAND( ADD(ch_counter, 1), MASK32 )
     RETURN(0)
-]
+}
 
-FUNC DERIVE_KEY_AND_NONCE(seed)[
+FUNC DERIVE_KEY_AND_NONCE(seed){
     s = BAND(seed, MASK32)
     i = 0
-    WHILE( LT(i, 1000) )[  # 8 key words
+    WHILE( LT(i, 1000) ){  # 8 key words
         s = BAND( ADD( MUL(s, 01000001110001100100111001101101), 00000000000000000011000000111001 ), MASK32 )
-        IF(EQ(i,0))[ ch_key0 = s ]
-        IF(EQ(i,1))[ ch_key1 = s ]
-        IF(EQ(i,10))[ ch_key2 = s ]
-        IF(EQ(i,11))[ ch_key3 = s ]
-        IF(EQ(i,100))[ ch_key4 = s ]
-        IF(EQ(i,101))[ ch_key5 = s ]
-        IF(EQ(i,110))[ ch_key6 = s ]
-        IF(EQ(i,111))[ ch_key7 = s ]
+        IF(EQ(i,0)){ ch_key0 = s }
+        IF(EQ(i,1)){ ch_key1 = s }
+        IF(EQ(i,10)){ ch_key2 = s }
+        IF(EQ(i,11)){ ch_key3 = s }
+        IF(EQ(i,100)){ ch_key4 = s }
+        IF(EQ(i,101)){ ch_key5 = s }
+        IF(EQ(i,110)){ ch_key6 = s }
+        IF(EQ(i,111)){ ch_key7 = s }
         i = ADD(i, 1)
-    ]
+    }
     j = 0
-    WHILE( LT(j, 11) )[  # 3 nonce words
+    WHILE( LT(j, 11) ){  # 3 nonce words
         s = BAND( ADD( MUL(s, 01000001110001100100111001101101), 00000000000000000011000000111001 ), MASK32 )
-        IF(EQ(j,0))[ ch_nonce0 = s ]
-        IF(EQ(j,1))[ ch_nonce1 = s ]
-        IF(EQ(j,10))[ ch_nonce2 = s ]
+        IF(EQ(j,0)){ ch_nonce0 = s }
+        IF(EQ(j,1)){ ch_nonce1 = s }
+        IF(EQ(j,10)){ ch_nonce2 = s }
         j = ADD(j, 1)
-    ]
+    }
     RETURN(0)
-]
+}
 
-FUNC CS_PRNG_SEED(seed)[
+FUNC CS_PRNG_SEED(seed){
     DERIVE_KEY_AND_NONCE(seed)
     ch_counter = 0
     ch_buf = collection.COL_EMPTY()
     ch_buf_pos = 10000  # 16
     RETURN(ch_counter)
-]
+}
 
-FUNC CS_PRNG_NEXT()[
-    IF( GTE(ch_buf_pos, 10000) )[  # 16
+FUNC CS_PRNG_NEXT(){
+    IF( GTE(ch_buf_pos, 10000) ){  # 16
         REFILL_BUF()
-    ]
+    }
     v = collection.COL_GET(ch_buf, ch_buf_pos)
     ch_buf_pos = ADD(ch_buf_pos, 1)
     RETURN(v)
-]
+}
 
-FUNC CS_PRNG_RANGE(max)[
+FUNC CS_PRNG_RANGE(max){
     ASSERT( GT(max, 0) )
     RETURN( MOD(CS_PRNG_NEXT(), max) )
-]
+}
 
-FUNC CS_PRNG_RANGE_MIN_MAX(min, max)[
+FUNC CS_PRNG_RANGE_MIN_MAX(min, max){
     ASSERT( LTE(min, max) )
     range = SUB(max, min)
-    IF( EQ(range, 0) )[ RETURN(min) ]
+    IF( EQ(range, 0) ){ RETURN(min) }
     ASSERT( GT(range, 0) )
     offset = CS_PRNG_RANGE(range)
     RETURN( ADD(offset, min) )
-]
+}

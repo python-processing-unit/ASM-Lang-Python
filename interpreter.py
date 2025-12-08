@@ -28,6 +28,7 @@ from parser import (
     SourceLocation,
     Statement,
     WhileStatement,
+    ContinueStatement,
 )
 
 
@@ -64,6 +65,11 @@ class BreakSignal(Exception):
     def __init__(self, count: int) -> None:
         super().__init__(count)
         self.count = count
+
+
+class ContinueSignal(Exception):
+    def __init__(self) -> None:
+        super().__init__()
 
 
 class JumpSignal(Exception):
@@ -574,6 +580,8 @@ class Interpreter:
             self._execute_block(program.statements, global_env)
         except BreakSignal as bs:
             raise ASMRuntimeError(f"BREAK({bs.count}) escaped enclosing loops", rewrite_rule="BREAK")
+        except ContinueSignal:
+            raise ASMRuntimeError("CONTINUE used outside loop", rewrite_rule="CONTINUE")
         except ASMRuntimeError as error:
             if self.logger.entries:
                 error.step_index = self.logger.entries[-1].step_index
@@ -647,6 +655,9 @@ class Interpreter:
             if count <= 0:
                 raise ASMRuntimeError("BREAK count must be > 0", location=statement.location, rewrite_rule="BREAK")
             raise BreakSignal(count)
+        if isinstance(statement, ContinueStatement):
+            # Signal to the innermost loop to skip to next iteration.
+            raise ContinueSignal()
         if isinstance(statement, GotoStatement):
             target = self._evaluate_expression(statement.expression, env)
             raise JumpSignal(target)
@@ -672,6 +683,18 @@ class Interpreter:
                     bs.count -= 1
                     raise
                 return
+            except ContinueSignal:
+                # Evaluate condition now to determine if there will be another iteration.
+                try:
+                    next_cond = self._evaluate_expression(statement.condition, env)
+                except ASMRuntimeError:
+                    # Propagate evaluation errors
+                    raise
+                if next_cond != 0:
+                    # proceed to next iteration
+                    continue
+                # no next iteration -> behave like BREAK(1)
+                return
 
     def _execute_for(self, statement: ForStatement, env: Environment) -> None:
         target: int = self._evaluate_expression(statement.target_expr, env)
@@ -683,6 +706,14 @@ class Interpreter:
                 if bs.count > 1:
                     bs.count -= 1
                     raise
+                return
+            except ContinueSignal:
+                # For FOR loops, increment the counter and decide whether to continue
+                current = env.get(statement.counter)
+                if current + 1 < target:
+                    env.set(statement.counter, current + 1)
+                    continue
+                # no further iterations -> behave like BREAK(1)
                 return
             env.set(statement.counter, env.get(statement.counter) + 1)
 

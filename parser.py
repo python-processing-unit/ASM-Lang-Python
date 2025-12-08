@@ -97,6 +97,11 @@ class GotopointStatement(Statement):
     expression: "Expression"
 
 
+@dataclass
+class ContinueStatement(Statement):
+    pass
+
+
 class Expression(Node):
     pass
 
@@ -152,6 +157,8 @@ class Parser:
             return self._parse_return()
         if token.type == "BREAK":
             return self._parse_break()
+        if token.type == "CONTINUE":
+            return self._parse_continue()
         if token.type == "GOTO":
             return self._parse_goto()
         if token.type == "GOTOPOINT":
@@ -236,6 +243,13 @@ class Parser:
         keyword = self._consume("GOTOPOINT")
         expression: Expression = self._parse_parenthesized_expression()
         return GotopointStatement(location=self._location_from_token(keyword), expression=expression)
+
+    def _parse_continue(self) -> ContinueStatement:
+        keyword = self._consume("CONTINUE")
+        # Expect empty parentheses: CONTINUE()
+        self._consume("LPAREN")
+        self._consume("RPAREN")
+        return ContinueStatement(location=self._location_from_token(keyword))
 
     def _parse_block(self) -> Block:
         opening = self._peek().type

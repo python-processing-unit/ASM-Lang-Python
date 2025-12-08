@@ -2,7 +2,7 @@ IMPORT(collection)
 IMPORT(prng)
 IMPORT(csprng)
 
-FUNC RUN_TESTS()[
+FUNC RUN_TESTS(){
   # Collection basics
   coll = collection.COL_EMPTY()
   ASSERT( EQ( collection.GET_COUNT(coll), 0 ) )
@@ -46,6 +46,6 @@ FUNC RUN_TESTS()[
   # If we reach here all tests passed; print success code and return
   PRINT(1)
   RETURN(0)
-]
+}
 
-IF( EQ(MAIN(), 1) )[ RUN_TESTS() ]
+IF( EQ(MAIN(), 1) ){ RUN_TESTS() }

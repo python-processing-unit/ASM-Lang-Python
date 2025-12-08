@@ -10,20 +10,20 @@ SHIFT_64 = 1000000
 MASK32 = SUB( POW(10, SHIFT_32), 1 )
 MASK64 = SUB( POW(10, SHIFT_64), 1 )
 
-FUNC ROTR32(x, n)[
+FUNC ROTR32(x, n){
 	v = BAND(x, MASK32)
-	IF( EQ(n, 0) )[ RETURN(v) ]
+	IF( EQ(n, 0) ){ RETURN(v) }
 	RETURN( BAND( BOR( SHR(v, n), SHL(v, SUB(SHIFT_32, n)) ), MASK32) )
-]
+}
 
-FUNC ROTL64(x, n)[
+FUNC ROTL64(x, n){
 	v = BAND(x, MASK64)
-	IF( EQ(n, 0) )[ RETURN(v) ]
+	IF( EQ(n, 0) ){ RETURN(v) }
 	RETURN( BAND( BOR( SHL(v, n), SHR(v, SUB(SHIFT_64, n)) ), MASK64) )
-]
+}
 
 # === SHA-256 ===
-FUNC SHA256_K()[
+FUNC SHA256_K(){
 	k = collection.COL_EMPTY()
 	k = collection.COL_PUSH(k, 01000010100010100010111110011000)
 	k = collection.COL_PUSH(k, 01110001001101110100010010010001)
@@ -90,9 +90,9 @@ FUNC SHA256_K()[
 	k = collection.COL_PUSH(k, 10111110111110011010001111110111)
 	k = collection.COL_PUSH(k, 11000110011100010111100011110010)
 	RETURN(k)
-]
+}
 
-FUNC SHA256_IV()[
+FUNC SHA256_IV(){
 	iv = collection.COL_EMPTY()
 	iv = collection.COL_PUSH(iv, 01101010000010011110011001100111)
 	iv = collection.COL_PUSH(iv, 10111011011001111010111010000101)
@@ -103,37 +103,37 @@ FUNC SHA256_IV()[
 	iv = collection.COL_PUSH(iv, 00011111100000111101100110101011)
 	iv = collection.COL_PUSH(iv, 01011011111000001100110100011001)
 	RETURN(iv)
-]
+}
 
-FUNC SHA256_BIG_SIG0(x)[
+FUNC SHA256_BIG_SIG0(x){
 	RETURN( BXOR( BXOR( ROTR32(x, 10), ROTR32(x, 1101) ), ROTR32(x, 10110) ) )
-]
+}
 
-FUNC SHA256_BIG_SIG1(x)[
+FUNC SHA256_BIG_SIG1(x){
 	RETURN( BXOR( BXOR( ROTR32(x, 110), ROTR32(x, 1011) ), ROTR32(x, 11001) ) )
-]
+}
 
-FUNC SHA256_SMALL_SIG0(x)[
+FUNC SHA256_SMALL_SIG0(x){
 	RETURN( BXOR( BXOR( ROTR32(x, 111), ROTR32(x, 10010) ), SHR(x, 11) ) )
-]
+}
 
-FUNC SHA256_SMALL_SIG1(x)[
+FUNC SHA256_SMALL_SIG1(x){
 	RETURN( BXOR( BXOR( ROTR32(x, 10001), ROTR32(x, 10011) ), SHR(x, 1010) ) )
-]
+}
 
-FUNC SHA256_CH(x, y, z)[
+FUNC SHA256_CH(x, y, z){
 	RETURN( BXOR( BAND(x, y), BAND( BNOT(x), z ) ) )
-]
+}
 
-FUNC SHA256_MAJ(x, y, z)[
+FUNC SHA256_MAJ(x, y, z){
 	RETURN( BXOR( BXOR( BAND(x, y), BAND(x, z) ), BAND(y, z) ) )
-]
+}
 
-FUNC SHA256_BYTES_TO_WORD(b0, b1, b2, b3)[
+FUNC SHA256_BYTES_TO_WORD(b0, b1, b2, b3){
 	RETURN( BOR( SHL(BAND(b0, BYTE_MASK), SHIFT_24), BOR( SHL(BAND(b1, BYTE_MASK), SHIFT_16), BOR( SHL(BAND(b2, BYTE_MASK), SHIFT_8), BAND(b3, BYTE_MASK) ) ) ) )
-]
+}
 
-FUNC SHA256_WORD_TO_BYTES(word)[
+FUNC SHA256_WORD_TO_BYTES(word){
 	w = BAND(word, MASK32)
 	out = collection.COL_EMPTY()
 	out = collection.COL_PUSH(out, BAND( DIV(w, POW(10, SHIFT_24)), BYTE_MASK))
@@ -141,30 +141,30 @@ FUNC SHA256_WORD_TO_BYTES(word)[
 	out = collection.COL_PUSH(out, BAND( DIV(w, POW(10, SHIFT_8)), BYTE_MASK))
 	out = collection.COL_PUSH(out, BAND(w, BYTE_MASK))
 	RETURN(out)
-]
+}
 
-FUNC SHA256_PAD(message)[
+FUNC SHA256_PAD(message){
 	msg = message
 	bit_len = MUL( collection.GET_COUNT(msg), SHIFT_8 )
 	msg = collection.COL_PUSH(msg, 10000000)  # 0x80
 
 	block_bytes = 1000000  # 64
 	pad_target = 111000     # 56
-	WHILE( NOT( EQ( MOD(collection.GET_COUNT(msg), block_bytes), pad_target ) ) )[
+	WHILE( NOT( EQ( MOD(collection.GET_COUNT(msg), block_bytes), pad_target ) ) ){
 		msg = collection.COL_PUSH(msg, 0)
-	]
+	}
 
 	i = 111  # 7
-	WHILE( GTE(i, 0) )[
+	WHILE( GTE(i, 0) ){
 		shift = MUL(i, SHIFT_8)
 		b = BAND( DIV(bit_len, POW(10, shift)), BYTE_MASK)
 		msg = collection.COL_PUSH(msg, b)
 		i = SUB(i, 1)
-	]
+	}
 	RETURN(msg)
-]
+}
 
-FUNC SHA256(message_bytes)[
+FUNC SHA256(message_bytes){
 	k = SHA256_K()
 	hvals = SHA256_IV()
 	msg = SHA256_PAD(message_bytes)
@@ -172,23 +172,23 @@ FUNC SHA256(message_bytes)[
 	block_size = 1000000  # 64 bytes
 	total = collection.GET_COUNT(msg)
 	offset = 0
-	WHILE( LT(offset, total) )[
+	WHILE( LT(offset, total) ){
 		w = collection.COL_EMPTY()
 		j = 0
-		WHILE( LT(j, 10000) )[
+		WHILE( LT(j, 10000) ){
 			base = ADD(offset, MUL(j, 100))
 			w = collection.COL_PUSH(w, SHA256_BYTES_TO_WORD( collection.COL_GET(msg, base), collection.COL_GET(msg, ADD(base,1)), collection.COL_GET(msg, ADD(base,10)), collection.COL_GET(msg, ADD(base,11)) ))
 			j = ADD(j, 1)
-		]
+		}
 
 		idx = 10000
-		WHILE( LT(idx, 1000000) )[
+		WHILE( LT(idx, 1000000) ){
 			s0 = SHA256_SMALL_SIG0( collection.COL_GET(w, SUB(idx, 1111)) )
 			s1 = SHA256_SMALL_SIG1( collection.COL_GET(w, SUB(idx, 10)) )
 			new_w = BAND( ADD( ADD( ADD(s1, collection.COL_GET(w, SUB(idx, 111))), collection.COL_GET(w, SUB(idx, 10000)) ), s0 ), MASK32)
 			w = collection.COL_PUSH(w, new_w)
 			idx = ADD(idx, 1)
-		]
+		}
 
 		a = collection.COL_GET(hvals,0)
 		b = collection.COL_GET(hvals,1)
@@ -200,7 +200,7 @@ FUNC SHA256(message_bytes)[
 		h = collection.COL_GET(hvals,111)
 
 		t = 0
-		WHILE( LT(t, 1000000) )[
+		WHILE( LT(t, 1000000) ){
 			T1 = BAND( ADD( ADD( ADD( ADD(h, SHA256_BIG_SIG1(e)), SHA256_CH(e, f, g) ), collection.COL_GET(k, t) ), collection.COL_GET(w, t) ), MASK32)
 			T2 = BAND( ADD( SHA256_BIG_SIG0(a), SHA256_MAJ(a, b, c) ), MASK32)
 
@@ -214,7 +214,7 @@ FUNC SHA256(message_bytes)[
 			a = BAND( ADD(T1, T2), MASK32)
 
 			t = ADD(t, 1)
-		]
+		}
 
 		h0 = BAND( ADD(collection.COL_GET(hvals,0), a), MASK32)
 		h1 = BAND( ADD(collection.COL_GET(hvals,1), b), MASK32)
@@ -236,17 +236,17 @@ FUNC SHA256(message_bytes)[
 		hvals = collection.COL_PUSH(hvals, h7)
 
 		offset = ADD(offset, block_size)
-	]
+	}
 
 	digest = collection.COL_EMPTY()
 	hi = 0
-	WHILE( LT(hi, 1000) )[
+	WHILE( LT(hi, 1000) ){
 		word_bytes = SHA256_WORD_TO_BYTES( collection.COL_GET(hvals, hi) )
 		digest = collection.COL_PUSH(digest, collection.COL_GET(word_bytes,0))
 		digest = collection.COL_PUSH(digest, collection.COL_GET(word_bytes,1))
 		digest = collection.COL_PUSH(digest, collection.COL_GET(word_bytes,10))
 		digest = collection.COL_PUSH(digest, collection.COL_GET(word_bytes,11))
 		hi = ADD(hi, 1)
-	]
+	}
 	RETURN(digest)
-]
+}

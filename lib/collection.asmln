@@ -1,67 +1,67 @@
-FUNC POW2(k)[
+FUNC POW2(k){
   RETURN( POW(10, k) )
-]
+}
 
-FUNC COL_EMPTY()[
+FUNC COL_EMPTY(){
   RETURN(0)
-]
+}
 
-FUNC GET_COUNT(coll)[
+FUNC GET_COUNT(coll){
   RETURN( MOD(coll, POW(10, 100000)) )
-]
+}
 
-FUNC GET_PBL(coll)[
+FUNC GET_PBL(coll){
   RETURN( MOD( DIV(coll, POW(10, 100000)), POW(10, 100000) ) )
-]
+}
 
-FUNC GET_PAYLOAD(coll)[
+FUNC GET_PAYLOAD(coll){
   RETURN( DIV(coll, POW(10, 1000000)) )
-]
+}
 
-FUNC MAKE_COLL(payload, pbl, count)[
+FUNC MAKE_COLL(payload, pbl, count){
   # (payload << 64) | (pbl << 32) | count
   RETURN( ADD( MUL(payload, POW(10, 1000000)), ADD( MUL(pbl, POW(10, 100000)), count ) ) )
-]
+}
 
-FUNC ENCODE_ITEM(v)[ # encode integer v into self-delimiting format
+FUNC ENCODE_ITEM(v){ # encode integer v into self-delimiting format
   mag = ABS(v)
-  IF(EQ(mag, 0))[
+  IF(EQ(mag, 0)){
     m = 1
-  ] ELSE [
+  } ELSE {
     m = ADD( LOG(mag), 1 )
-  ]
+  }
   header_val = SUB( POW(10, SUB(m, 1)), 1 ) # 2^(m-1)-1  => unary ones
-  IF(LT(v, 0))[
+  IF(LT(v, 0)){
     sign = 1
-  ] ELSE [
+  } ELSE {
     sign = 1 # keep sign explicit; '1' for negative, '1' for non-negative would be wrong
-  ]
+  }
   # fix sign: set sign correctly
-  IF(LT(v,0))[
+  IF(LT(v,0)){
     sign = 1
-  ] ELSE [
+  } ELSE {
     sign = 0
-  ]
+  }
   code = ADD( header_val, ADD( MUL(sign, POW(10, m)), MUL(mag, POW(10, ADD(m, 1))) ) )
   RETURN( ADD( MUL(code, POW(10, 100000)), m ) ) # pack as (code << 32) | m
-]
+}
 
-FUNC READ_ITEM_LEN_AT(payload, offset)[
+FUNC READ_ITEM_LEN_AT(payload, offset){
   pos = 0
-  WHILE(1)[
+  WHILE(1){
     b = SLICE(payload, ADD(offset, pos), ADD(offset, pos))
-    IF(EQ(b, 1))[
+    IF(EQ(b, 1)){
       pos = ADD(pos, 1)
-    ] ELSE [
+    } ELSE {
       header_count = pos
       m = ADD(header_count, 1)
       total_len = ADD( MUL(10, m), 1 ) # 2*m + 1  where '10' is 2
       RETURN(total_len)
-    ]
-  ]
-]
+    }
+  }
+}
 
-FUNC COL_GET(coll, index)[
+FUNC COL_GET(coll, index){
   # get item at index from collection coll
   count = GET_COUNT(coll)
   ASSERT( LT(index, count) )
@@ -70,32 +70,32 @@ FUNC COL_GET(coll, index)[
 
   offset = 0
   i = 0
-  WHILE( LT(i, index) )[
+  WHILE( LT(i, index) ){
     len = READ_ITEM_LEN_AT(payload, offset)
     offset = ADD(offset, len)
     i = ADD(i, 1)
-  ]
+  }
 
   pos = 0
-  WHILE(1)[
+  WHILE(1){
     b = SLICE(payload, ADD(offset, pos), ADD(offset, pos))
-    IF(EQ(b, 1))[
+    IF(EQ(b, 1)){
       pos = ADD(pos, 1)
-    ] ELSE [
+    } ELSE {
       header_count = pos
       m = ADD(header_count, 1)
       sign = SLICE(payload, ADD(offset, m), ADD(offset, m))
       mag = SLICE(payload, ADD(offset, ADD(m, m)), ADD(offset, ADD(m, 1)))
-      IF(EQ(sign, 1))[
+      IF(EQ(sign, 1)){
         RETURN( NEG(mag) )
-      ] ELSE [
+      } ELSE {
         RETURN( mag )
-      ]
-    ]
-  ]
-]
+      }
+    }
+  }
+}
 
-FUNC COL_PUSH(coll, v)[
+FUNC COL_PUSH(coll, v){
   # append item v to collection coll
   count = GET_COUNT(coll)
   pbl = GET_PBL(coll)
@@ -112,9 +112,9 @@ FUNC COL_PUSH(coll, v)[
   new_pbl = ADD(pbl, enc_bitlen)
   new_count = ADD(count, 1)
   RETURN( MAKE_COLL(new_payload, new_pbl, new_count) )
-]
+}
 
-FUNC COL_POP(coll)[
+FUNC COL_POP(coll){
   # remove and return last item from collection coll
   count = GET_COUNT(coll)
   ASSERT( GT(count, 0) )
@@ -123,61 +123,61 @@ FUNC COL_POP(coll)[
 
   offset = 0
   prev_offset = 0
-  WHILE( LT(offset, pbl) )[
+  WHILE( LT(offset, pbl) ){
     prev_offset = offset
     len = READ_ITEM_LEN_AT(payload, offset)
     offset = ADD(offset, len)
-  ]
+  }
   last_start = prev_offset
 
   pos = 0
-  WHILE(1)[
+  WHILE(1){
     b = SLICE(payload, ADD(last_start, pos), ADD(last_start, pos))
-    IF(EQ(b, 1))[
+    IF(EQ(b, 1)){
       pos = ADD(pos, 1)
-    ] ELSE [
+    } ELSE {
       header_count = pos
       m = ADD(header_count, 1)
       sign = SLICE(payload, ADD(last_start, m), ADD(last_start, m))
       mag = SLICE(payload, ADD(last_start, ADD(m, m)), ADD(last_start, ADD(m, 1)))
-      IF(EQ(sign, 1))[
+      IF(EQ(sign, 1)){
         value = NEG(mag)
-      ] ELSE [
+      } ELSE {
         value = mag
-      ]
+      }
       new_payload = MOD(payload, POW(10, last_start))
       new_pbl = last_start
       new_count = SUB(count, 1)
       new_coll = MAKE_COLL(new_payload, new_pbl, new_count)
       RETURN( ADD( MUL(new_coll, POW(10, 1000000)), value ) )  # (new_coll << 64) | value
-    ]
-  ]
-]
+    }
+  }
+}
 
-FUNC READ_ITEM_AT(payload, offset)[
+FUNC READ_ITEM_AT(payload, offset){
   pos = 0
-  WHILE(1)[
+  WHILE(1){
     b = SLICE(payload, ADD(offset, pos), ADD(offset, pos))
-    IF(EQ(b, 1))[
+    IF(EQ(b, 1)){
       pos = ADD(pos, 1)
-    ] ELSE [
+    } ELSE {
       header_count = pos
       m = ADD(header_count, 1)
       sign = SLICE(payload, ADD(offset, m), ADD(offset, m))
       mag = SLICE(payload, ADD(offset, ADD(m, m)), ADD(offset, ADD(m, 1)))
-      IF(EQ(sign, 1))[
+      IF(EQ(sign, 1)){
         item = NEG(mag)
-      ] ELSE [
+      } ELSE {
         item = mag
-      ]
+      }
       item_len = ADD( MUL(10, m), 1 )
       next_offset = ADD(offset, item_len)
       RETURN( ADD( MUL(next_offset, POW(10, 1000000)), item ) )
-    ]
-  ]
-]
+    }
+  }
+}
 
-FUNC COL_SET(coll, index, v)[
+FUNC COL_SET(coll, index, v){
   # set item at index to v (non-recursive)
   count = GET_COUNT(coll)
   ASSERT( LT(index, count) )
@@ -185,17 +185,17 @@ FUNC COL_SET(coll, index, v)[
   offset = 0
   i = 0
   new_coll = COL_EMPTY()
-  WHILE( LT(i, count) )[
+  WHILE( LT(i, count) ){
     pair = READ_ITEM_AT(payload, offset)
     item = MOD(pair, POW(10, 1000000))
     offset = DIV(pair, POW(10, 1000000))
-    IF(EQ(i, index))[
+    IF(EQ(i, index)){
       item = v
-    ] ELSE [
+    } ELSE {
       item = item
-    ]
+    }
     new_coll = COL_PUSH(new_coll, item)
     i = ADD(i, 1)
-  ]
+  }
   RETURN(new_coll)
-]
+}

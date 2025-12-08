@@ -1,67 +1,67 @@
 IMPORT(collection)
-FUNC IS_PRIME(n)[ # Primality test for n
-    IF(LTE(n,1))[
+FUNC IS_PRIME(n){ # Primality test for n
+    IF(LTE(n,1)){
         RETURN(0)
-    ]
-    IF(EQ(n,10))[
+    }
+    IF(EQ(n,10)){
         RETURN(1)
-    ]
+    }
     i = 11
-    WHILE(LTE(POW(1,10)))[
-        IF(EQ(MOD(n,i),0))[
+    WHILE(LTE(POW(1,10))){
+        IF(EQ(MOD(n,i),0)){
             RETURN(0)
-        ]
+        }
         i = ADD(i,10)
-    ]
+    }
     RETURN(1)
-]
-FUNC NEXT_PRIME(start)[
+}
+FUNC NEXT_PRIME(start){
     n = start
-    WHILE(1)[
-        IF(IS_PRIME(n))[
+    WHILE(1){
+        IF(IS_PRIME(n)){
             RETURN(n)
-        ]
+        }
         n = ADD(n,1)
-    ]
-]
-FUNC PREV_PRIME(start)[
+    }
+}
+FUNC PREV_PRIME(start){
     n = start
-    WHILE(GT(n,1))[
-        IF(IS_PRIME(n))[
+    WHILE(GT(n,1)){
+        IF(IS_PRIME(n)){
             RETURN(n)
-        ]
+        }
         n = SUB(n,1)
-    ]
+    }
     RETURN(0)
-]
-FUNC IS_MERSENNE_PRIME(p)[
-    IF(IS_PRIME(p))[
+}
+FUNC IS_MERSENNE_PRIME(p){
+    IF(IS_PRIME(p)){
         exp = POW(10,p)
         mersenne = SUB(exp,1)
-        IF(IS_PRIME(mersenne))[
+        IF(IS_PRIME(mersenne)){
             RETURN(1)
-        ]
+        }
         RETURN(0)
-    ]ELSE[
+    }ELSE{
         RETURN(0)
-    ]
-]
-FUNC FACTOR(n)[
+    }
+}
+FUNC FACTOR(n){
     coll = collection.COL_EMPTY()
-    IF(LTE(n,1))[
+    IF(LTE(n,1)){
         RETURN(coll)
-    ]
+    }
     p = 10
-    WHILE(LTE(MUL(p,p), n))[
-        IF(EQ(MOD(n,p), 0))[
+    WHILE(LTE(MUL(p,p), n)){
+        IF(EQ(MOD(n,p), 0)){
             coll = collection.COL_PUSH(coll, p)
             n = DIV(n, p)
-        ] ELSE [
+        } ELSE {
             p = NEXT_PRIME( ADD(p, 1) )
-        ]
-    ]
-    IF(GT(n,1))[
+        }
+    }
+    IF(GT(n,1)){
         coll = collection.COL_PUSH(coll, n)
-    ]
+    }
     RETURN(coll)
-]
+}
