@@ -6,8 +6,8 @@ integer data model and an explicit small-step execution semantics. A program
 is compiled into an initial machine state (a seed configuration) and then
 executed solely by repeatedly applying a fixed, program-independent
 state-transition (rewrite) function. All intermediate states are
-(semi-)human-readable and serializable, and execution can be traced and replayed
-exactly, including I/O and nondeterministic choices, which are modeled
+(semi-)human-readable and serializable, and execution can be traced and
+replayed exactly, including I/O and nondeterministic choices, which are modeled
 explicitly for deterministic replay.
 
 1. Overview
@@ -52,6 +52,13 @@ function names (Section 2.5); keywords and built-ins (control-flow
 keywords, built-in operators and functions; see Sections 4 and 5); and
 delimiters, namely '(', ')', '[', ']', '{', '}', ',', and '='.
 
+Keywords: The language's reserved keywords (for example, 'IF', 'WHILE',
+'FUNC', etc.) are matched by the lexer exactly as listed in this
+specification and are case-sensitive. Programs must use the keywords in
+their canonical uppercase form; otherwise the token will be recognized as
+an identifier. Built-in operator names such as 'INPUT', 'PRINT', and
+'IMPORT' follow the same case-sensitive matching rules.
+
 Line continuation: The character '^' serves as a line-continuation marker.
 When a caret '^' appears in the source and is followed immediately by a
 newline, both the '^' and the newline are ignored by the lexer (that is,
@@ -76,6 +83,17 @@ while `0foo` and `1bar` are not). The namespace is flat: variables and
 functions share a single identifier space, so a given name cannot
 simultaneously denote both. A user-defined function name must not conflict
 with the name of any built-in operator or function (see Section 4.1).
+
+Identifier character set (clarification): The first character of an
+identifier MUST be an ASCII letter (A–Z or a–z) or underscore ('_').
+Subsequent characters MAY be ASCII letters, underscore, or the binary
+digits '0' and '1' only. Decimal digits other than '0' and '1' (that is,
+'2'..'9') and the dot character '.' are NOT permitted inside identifiers.
+Identifiers therefore cannot contain '.' (dot) and may not include any
+non-binary digits; this preserves an unambiguous lexical distinction
+between binary integer literals and identifiers, and prevents confusion
+with module-qualified names (which are formed by a separate dotted name
+syntax documented elsewhere in this specification).
 
 
 3. Data Model
@@ -163,12 +181,12 @@ result is typically 0, with exact behavior left to the implementation.
 Finally, 'PROD(a1, a2, ..., aN)' computes the integer product of its
 arguments (for 'N ≥ 1'); if any argument is '0' the result is '0'.
 
-Several operators aggregate multiple arguments. 'MAX(a1, ..., aN)' and 'MIN(a1, ..., aN)'
-return, respectively, the larger and smaller of their two arguments.
-'ALL(a1, ..., an)' performs a Boolean AND over any number of arguments
-'n ≥ 1', returning '1' if all are non-zero and '0' otherwise; 'ANY(a1,
-..., an)' performs a Boolean OR over any number of arguments, returning '1'
-if at least one is non-zero and '0' otherwise. 'SUM(a1, a2, ..., an)'
+Several operators aggregate multiple arguments. 'MAX(a1, ..., aN)' and
+'MIN(a1, ..., aN)' return, respectively, the larger and smaller of their two 
+arguments. 'ALL(a1, ..., an)' performs a Boolean AND over any number of
+arguments 'n ≥ 1', returning '1' if all are non-zero and '0' otherwise;
+'ANY(a1,..., an)' performs a Boolean OR over any number of arguments, returning
+'1' if at least one is non-zero and '0' otherwise. 'SUM(a1, a2, ..., an)'
 computes the integer sum of its arguments. 'LEN(a1, a2, ..., an)' returns the
 number of arguments supplied, that is, 'n'. 'JOIN(a1, ..., aN)' concatenates
 the binary spellings of its arguments in call order and returns the integer
@@ -366,8 +384,9 @@ implementation-defined, commonly taken to be '0'.
 Built-in operators and functions can be viewed as pre-defined functions
 provided by the runtime environment. User-defined functions share the same
 call syntax and are distinguished only by their names and bodies. Because of
-the shared namespace, a user-defined function is not permitted to use any
-name already reserved for a built-in. Attempting to violate this will raise an exception.
+the shared namespace, a user-defined function is not permitted to use any name
+already reserved for a built-in. Attempting to violate this will raise an
+exception.
 
 
 7. Variables and Memory Model
@@ -415,8 +434,8 @@ The standard library is a group of modules for common use cases distributed
 with the interpreter.
 It includes modules for:
 - Collections: indexed lists of integers with efficient encoding and decoding.
-- CSPRNG: Cryptographically secure (ChaCha20) pseudorandom number generation with
-  seed management.
+- CSPRNG: Cryptographically secure (ChaCha20) pseudorandom number generation
+  with seed management.
 - Encryption: AES-GCM and RSA-OAEP encryption and decryption utilities.
 - Hashes: SHA-256 hashing.
 - Prime: primality testing and prime number generation, along with
@@ -653,7 +672,8 @@ full 'rewrite_record' describing the DIV operation that failed.
 
   Example invocations (illustrative):
   - File mode: 'interpreter program.asm'
-  - Source-string mode: 'interpreter -source "foo = INPUT\nPRINT(foo)" -verbose'
+  - Source-string mode: 'interpreter -source "foo = INPUT\nPRINT(foo)"
+    -verbose'
 
   - REPL / Interactive mode: 'interpreter' (no program argument)
 
@@ -712,16 +732,22 @@ argument shape but don't want to re-read the full specification.
 
 Function / Operator Signatures (expression position)
 - 'INPUT()' or 'INPUT' : returns integer from input stream (0 for empty)
-- 'PRINT(a1, a2, ..., aN)' : prints arguments (side-effect), return value discarded
+- 'PRINT(a1, a2, ..., aN)' : prints arguments (side-effect), return value
+  discarded
 - 'ASSERT(a)' : crashes if 'a' is 0
-- 'MAIN()' : 1 if executing in the primary program file, else 0 when in imported code
+- 'MAIN()' : 1 if executing in the primary program file, else 0 when in
+  imported code
 - 'DEL(x)' : delete variable 'x' from environment
-- 'EXIT()' or 'EXIT(code)' : terminate program immediately with optional exit code (default 0)
-- 'IMPORT(name)' : load and execute '<name>.asmln' beside the caller, sharing the caller's namespace
-- Binary literal: optional leading '-' (spaces/tabs/CR allowed after the dash) then '{0,1}+'
-- 'EXIST(x)' : returns '1' if the identifier 'x' exists in the current environment
-  (searching enclosing environments), else '0'. The argument must be an identifier; supplying
-  an expression that is not a plain identifier is a runtime error.
+- 'EXIT()' or 'EXIT(code)' : terminate program immediately with optional exit
+  code (default 0)
+- 'IMPORT(name)' : load and execute '<name>.asmln' beside the caller, sharing
+  the caller's namespace
+- Binary literal: optional leading '-' (spaces/tabs/CR allowed after the dash)
+  then '{0,1}+'
+- 'EXIST(x)' : returns '1' if the identifier 'x' exists in the current
+  environment (searching enclosing environments), else '0'. The argument must
+  be an identifier; supplying an expression that is not a plain identifier is a
+  runtime error.
 
 Arithmetic
 - 'ADD(a, b)' : a + b
@@ -743,7 +769,8 @@ Bitwise / Boolean
 - 'BNOT(a)' : bitwise complement
 - 'SHL(a, b)' : arithmetic shift-left of 'a' by 'b' bits (b >= 0)
 - 'SHR(a, b)' : arithmetic shift-right of 'a' by 'b' bits (b >= 0)
-- 'SLICE(a, hi, lo)' : inclusive bit-slice of 'a' from bit index 'hi' down to 'lo' (LSB index 0)
+- 'SLICE(a, hi, lo)' : inclusive bit-slice of 'a' from bit index 'hi' down to
+  'lo' (LSB index 0)
 - 'AND(a, b)' : Boolean AND -> 0 or 1
 - 'OR(a, b)' : Boolean OR -> 0 or 1
 - 'XOR(a, b)' : Boolean XOR -> 0 or 1
@@ -775,14 +802,18 @@ Logarithms
 Control / Function / Statement Signatures (statement position)
 - Assignment: 'identifier = expression'
 - Block: '[ statement1 ... statementN ]' or '{ statement1 ... statementN }'
-- 'IF(condition)[ block ]' (optional 'ELSIF(condition)[ block ]' ... 'ELSE[ block ]')
+- 'IF(condition)[ block ]'
+  (optional 'ELSIF(condition)[ block ]' ... 'ELSE[ block ]')
 - 'WHILE(condition)[ block ]'
-- 'FOR(counter, target)[ block ]' : 'counter' initialized to 0, loop until counter >= target
+- 'FOR(counter, target)[ block ]' : 'counter' initialized to 0, loop until
+  counter >= target
 - 'FUNC name(arg1, arg2, ..., argN)[ block ]' : defines a function
 - 'RETURN(a)' : return from function with value 'a'
 - 'BREAK(n)' : break out of the innermost 'n' enclosing loops; raises a
-  runtime error if 'n' ≤ 0 or if 'n' is greater than the current loop nesting depth
-- 'GOTOPOINT(n)' : register a gotopoint with identifier 'n' at this statement's location
+  runtime error if 'n' ≤ 0 or if 'n' is greater than the current loop nesting
+  depth
+- 'GOTOPOINT(n)' : register a gotopoint with identifier 'n' at this statement's
+  location
   (n evaluated at runtime). Gotopoints are visible across the containing
   function or top-level scope rather than being restricted to a single
   lexical block.
