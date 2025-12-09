@@ -175,6 +175,11 @@ exponent, SHL/SHR require non-negative shift counts, etc.).
 Mixed-type operators (INT or STR):
 - LEN(a1, ..., aN) returns the number of supplied arguments (an INT) and does
   not inspect the argument types.
+- SLEN(s) returns the length of the supplied STR in characters as an INT. The
+  argument must be a STR; passing an INT raises a runtime error.
+- ILEN(n) returns the length in binary digits of the absolute value of the
+  supplied INT. ILEN(0) returns 1. The argument must be an INT; passing a STR
+  raises a runtime error.
 - AND, OR, XOR, NOT, ALL, ANY treat INT values as usual (0 is false, non-zero
   is true) and treat STR values as false when empty and true when non-empty.
   These operators always return an INT 0 or 1.
@@ -230,16 +235,22 @@ File operations:
   does not raise on write failure.
 - EXISTFILE(path):INT — Returns INT 1 when a filesystem object exists at
   'path', otherwise returns INT 0. The argument must be a STR.
-- RUN(command):INT — Executes the provided 'command' string using the
-   host shell and returns the subprocess exit code as an INT. The 'command'
-   argument must be a STR. On a failure to start the subprocess (for example
-   if the system cannot invoke a shell), the interpreter raises a runtime
-   error (rewrite: RUN). The call records a 'RUN' event in the execution
-   I/O log containing the command text and returned exit code, enabling
-   deterministic logging and replay.
+- CL(command):INT — Executes the provided 'command' string using the
+  host shell and returns the subprocess exit code as an INT. The 'command'
+  argument must be a STR. On a failure to start the subprocess (for example
+  if the system cannot invoke a shell), the interpreter raises a runtime
+  error (rewrite: CL). The call records a 'CL' event in the execution
+  I/O log containing the command text and returned exit code, enabling
+  deterministic logging and replay.
 
 Other operators (unchanged): IMPORT, MAIN, DEL, EXIST, and EXIT retain their
 previous meanings but now operate in a typed environment.
+
+Host and environment information:
+- OS():STR — Returns a short, lowercase ASCII string identifying the host
+  operating-system family. Typical values include 'win' for Windows,
+  'linux' for Linux, 'macos' for macOS, and 'unix' for other Unix-like
+  platforms. The call takes no arguments and returns a STR.
 
 'IMPORT(name)' loads and executes another source file as a distinct module
 namespace. The argument must be an identifier naming a module; the
@@ -279,13 +290,6 @@ IMPORT does not modify or remove the original bindings of modules that the
 imported module relied upon; instead, nested qualified names are exposed
 under the importer as dotted names rooted at the imported module's
 identifier.
-
-'INPUT()' (or simply 'INPUT' in expression position) reads a value from the
-console or input stream. If the incoming text is empty, the result is '0'.
-If the text consists solely of the characters '0' and '1', it is interpreted
-as the corresponding binary integer. Any other non-empty text yields the
-result '1'. All I/O events, including inputs, are recorded in the execution
-log for deterministic replay.
 
 'ASSERT(a)' checks that its argument is true in the Boolean sense. If 'a' is
 non-zero, execution proceeds normally; if 'a' is '0', the program crashes
@@ -474,8 +478,6 @@ It includes modules for:
 - Collections: indexed lists of integers with efficient encoding and decoding.
 - CSPRNG: Cryptographically secure (ChaCha20) pseudorandom number generation
   with seed management.
-- Encryption: AES-GCM and RSA-OAEP encryption and decryption utilities.
-- Hashes: SHA-256 hashing.
 - Prime: primality testing and prime number generation, along with
   factorization and other common prime utilities.
 - PRNG: Fast (LCG) pseudorandom number generation with seed management.
@@ -596,39 +598,7 @@ associated inputs.
 10.4 Machine-readable traceback (JSON)
 
 The interpreter must also be able to emit a machine-readable traceback
-structure suitable for diagnostics tools and editors. A suggested JSON
-schema is:
-
-{
-  "error": {
-    "type": "DivisionByZero",
-    "message": "Divide by zero in DIV(foo, 0)",
-    "failing_step_index": 123
-  },
-  "traceback": [
-    {
-      "frame_index": 0,
-      "name": "<top-level>",
-      "source_location": {"file": "prog.asmln", "line": 12, "statement": "foo = INPUT"},
-      "state_id": "s_0003",
-      "step_index": 42,
-      "env_snapshot": {"foo": 5, "bar": 10}
-    },
-    {
-      "frame_index": 1,
-      "name": "compute",
-      "source_location": {"file": "lib.asmln", "line": 88, "statement": "DIV(a, b)"},
-      "state_id": "s_0123",
-      "step_index": 123,
-      "env_snapshot": {"a": 17, "b": 0},
-      "rewrite_record": {"rule": "DIV", "from_state_id": "s_0122", "to_state_id": "s_0123", "args": [17, 0]}
-    }
-  ]
-}
-
-The schema above is a guideline; implementations may extend it with
-additional fields (for example, a Bitwise XOR between 'from_state' and
-'to_state', or full serialized states). The only requirement is that a
+structure suitable for diagnostics tools and editors. The only requirement is that a
 consumer of the state log can identify which state and which rewrite
 step correspond to each frame.
 
@@ -682,40 +652,40 @@ innermost failing call in 'compute'. A verbose report would additionally
 print the 'env_snapshot' for 'compute' showing 'a: 17, b: 0' and the
 full 'rewrite_record' describing the DIV operation that failed.
 
-  11. Interpreter Use
-  -------------------
+11. Interpreter Use
+-------------------
 
-  This section documents how the reference interpreter accepts program input
-  and how to enable verbose tracebacks that include environment snapshots.
+This section documents how the reference interpreter accepts program input
+and how to enable verbose tracebacks that include environment snapshots.
 
-  - Invocation arguments: the interpreter reads its first program argument
-    (that is, 'argv[1]') as the program source. If the '-source' flag is not
-    present, 'argv[1]' is interpreted as a path to a source file and the
-    interpreter loads and parses that file. If the '-source' flag is present,
-    'argv[1]' is treated as the source text itself (a string containing the
-    program) and is parsed directly without reading a file.
+- Invocation arguments: the interpreter reads its first program argument
+  (that is, 'argv[1]') as the program source. If the '-source' flag is not
+  present, 'argv[1]' is interpreted as a path to a source file and the
+  interpreter loads and parses that file. If the '-source' flag is present,
+  'argv[1]' is treated as the source text itself (a string containing the
+  program) and is parsed directly without reading a file.
 
-  - Verbose tracebacks: if the '-verbose' flag is supplied on the command
-    line, tracebacks include the environment snapshots described in
-    Section 10.8. In concise traceback mode the '-verbose' flag causes the
-    interpreter to attach an 'env_snapshot' entry to each frame shown; in
-    verbose traceback mode the same flag expands the printed 'State snapshot:'
-    blocks to include the selected local environment and any small set of
-    globals included by policy. The snapshot contents follow the requirements
-    in Section 10.2 and are suitable for deterministic replay.
+- Verbose tracebacks: if the '-verbose' flag is supplied on the command
+  line, tracebacks include the environment snapshots described in
+  Section 10.8. In concise traceback mode the '-verbose' flag causes the
+  interpreter to attach an 'env_snapshot' entry to each frame shown; in
+  verbose traceback mode the same flag expands the printed 'State snapshot:'
+  blocks to include the selected local environment and any small set of
+  globals included by policy. The snapshot contents follow the requirements
+  in Section 10.2 and are suitable for deterministic replay.
 
-  Notes:
-  - The interpreter may support additional flags and a different ordering of
-    arguments; the rules above define the semantics for 'argv[1]', '-source',
-    and '-verbose' specifically and are intended to be stable for tooling and
-    replay purposes.
+Notes:
+- The interpreter may support additional flags and a different ordering of
+  arguments; the rules above define the semantics for 'argv[1]', '-source',
+  and '-verbose' specifically and are intended to be stable for tooling and
+  replay purposes.
 
-  Example invocations (illustrative):
-  - File mode: 'interpreter program.asm'
-  - Source-string mode: 'interpreter -source "foo = INPUT\nPRINT(foo)"
-    -verbose'
+Example invocations (illustrative):
+- File mode: 'interpreter program.asm'
+- Source-string mode: 'interpreter -source "foo = INPUT\nPRINT(foo)"
+  -verbose'
 
-  - REPL / Interactive mode: 'interpreter' (no program argument)
+- REPL / Interactive mode: 'interpreter' (no program argument)
 
 REPL (Interactive Mode)
 -----------------------

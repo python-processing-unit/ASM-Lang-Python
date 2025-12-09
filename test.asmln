@@ -2,6 +2,7 @@ IMPORT(collection)
 IMPORT(prng)
 IMPORT(csprng)
 IMPORT(prime)
+IMPORT(decimal)
 
 FUNC RUN_TESTS():INT{
     # Collection basics
@@ -62,6 +63,12 @@ FUNC RUN_TESTS():INT{
     ASSERT( EQ( collection.GET_COUNT(factors), 10 ) )
     ASSERT( EQ( collection.COL_GET(factors, 0), 10 ) )
     ASSERT( EQ( collection.COL_GET(factors, 1), 101 ) )
+
+    # Decimal library tests
+    ASSERT(EQ(decimal.INT_TO_DEC(100),"4"))
+    ASSERT(EQ(decimal.DEC_TO_INT("4"),100))
+    ASSERT(EQ(decimal.INT_TO_DEC(-100),"-4"))
+    ASSERT(EQ(decimal.DEC_TO_INT("-4"),-100))
 
     # If we reach here all tests passed; print success code and return
     PRINT(1)

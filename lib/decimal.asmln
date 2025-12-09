@@ -1,0 +1,103 @@
+# Decimal <-> binary helpers
+
+INT: DEC_BASE = 1010  # 10
+
+FUNC DEC_CHAR_TO_INT(STR:ch):INT{
+    IF(EQ(ch, "0")){ RETURN(0) }
+    IF(EQ(ch, "1")){ RETURN(1) }
+    IF(EQ(ch, "2")){ RETURN(10) }
+    IF(EQ(ch, "3")){ RETURN(11) }
+    IF(EQ(ch, "4")){ RETURN(100) }
+    IF(EQ(ch, "5")){ RETURN(101) }
+    IF(EQ(ch, "6")){ RETURN(110) }
+    IF(EQ(ch, "7")){ RETURN(111) }
+    IF(EQ(ch, "8")){ RETURN(1000) }
+    IF(EQ(ch, "9")){ RETURN(1001) }
+    ASSERT(0)
+    RETURN(0)
+}
+
+FUNC INT_TO_DEC_CHAR(INT:d):STR{
+    IF(EQ(d, 0)){ RETURN("0") }
+    IF(EQ(d, 1)){ RETURN("1") }
+    IF(EQ(d, 10)){ RETURN("2") }
+    IF(EQ(d, 11)){ RETURN("3") }
+    IF(EQ(d, 100)){ RETURN("4") }
+    IF(EQ(d, 101)){ RETURN("5") }
+    IF(EQ(d, 110)){ RETURN("6") }
+    IF(EQ(d, 111)){ RETURN("7") }
+    IF(EQ(d, 1000)){ RETURN("8") }
+    IF(EQ(d, 1001)){ RETURN("9") }
+    ASSERT(0)
+    RETURN("")
+}
+
+FUNC DEC_TO_INT(STR:s):INT{
+    INT: len = SLEN(s)
+    ASSERT( GT(len, 0) )
+
+    INT: idx = 0
+    # skip any leading spaces before the sign or first digit
+    WHILE( AND( LT(idx, len), EQ(SLICE(s, SUB(len, ADD(idx, 1)), SUB(len, ADD(idx, 1))), " ") ) ){
+        idx = ADD(idx, 1)
+    }
+    ASSERT( LT(idx, len) )
+
+    INT: is_neg = 0
+    INT: ridx = SUB(len, ADD(idx, 1))
+    STR: first = SLICE(s, ridx, ridx)
+    # support optional leading '+' or '-' and allow spaces after the sign
+    IF(EQ(first, "-")){
+        is_neg = 1
+        idx = ADD(idx, 1)
+    } ELSE {
+        IF(EQ(first, "+")){
+            idx = ADD(idx, 1)
+        }
+    }
+
+    # skip spaces after the optional sign
+    WHILE( AND( LT(idx, len), EQ(SLICE(s, SUB(len, ADD(idx, 1)), SUB(len, ADD(idx, 1))), " ") ) ){
+        idx = ADD(idx, 1)
+    }
+    ASSERT( LT(idx, len) )
+
+    INT: acc = 0
+    WHILE( LT(idx, len) ){
+        INT: ridx2 = SUB(len, ADD(idx, 1))
+        STR: ch = SLICE(s, ridx2, ridx2)
+        INT: digit = DEC_CHAR_TO_INT(ch)
+        acc = ADD( MUL(acc, DEC_BASE), digit )
+        idx = ADD(idx, 1)
+    }
+
+    IF(is_neg){
+        RETURN( NEG(acc) )
+    }
+    RETURN(acc)
+}
+
+FUNC INT_TO_DEC(INT:n):STR{
+    IF(NOT(n)){
+        RETURN("0")
+    }
+
+    INT: is_neg = 0
+    IF(LT(n, 0)){
+        is_neg = 1
+        n = ABS(n)
+    }
+
+    STR: out = ""
+    WHILE( GT(n, 0) ){
+        INT: digit = MOD(n, DEC_BASE)
+        n = DIV(n, DEC_BASE)
+        STR: ch = INT_TO_DEC_CHAR(digit)
+        out = JOIN(ch, out)  # prepend to maintain most-significant-first order
+    }
+
+    IF(is_neg){
+        out = JOIN("-", out)
+    }
+    RETURN(out)
+}

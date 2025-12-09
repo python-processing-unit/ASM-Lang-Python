@@ -4,6 +4,7 @@ import subprocess
 import math
 import os
 import sys
+import platform
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -282,6 +283,8 @@ class Builtins:
         self._register_variadic("ANY", 1, self._any)
         self._register_variadic("ALL", 1, self._all)
         self._register_variadic("LEN", 0, self._len)
+        self._register_custom("SLEN", 1, 1, self._slen)
+        self._register_custom("ILEN", 1, 1, self._ilen)
         self._register_variadic("JOIN", 1, self._join)
         self._register_int_only("LOG", 1, self._safe_log)
         self._register_int_only("CLOG", 1, self._safe_clog)
@@ -290,6 +293,7 @@ class Builtins:
         self._register_custom("UPPER", 1, 1, self._upper)
         self._register_custom("LOWER", 1, 1, self._lower)
         self._register_custom("MAIN", 0, 0, self._main)
+        self._register_custom("OS", 0, 0, self._os)
         self._register_custom("IMPORT", 1, 1, self._import)
         self._register_custom("INPUT", 0, 0, self._input)
         self._register_custom("PRINT", 0, None, self._print)
@@ -301,7 +305,7 @@ class Builtins:
         self._register_custom("READFILE", 1, 1, self._readfile)
         self._register_custom("WRITEFILE", 2, 2, self._writefile)
         self._register_custom("EXISTFILE", 1, 1, self._existfile)
-        self._register_custom("RUN", 1, 1, self._run)
+        self._register_custom("CL", 1, 1, self._cl)
         self._register_custom("EXIT", 0, 1, self._exit)
 
     def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
@@ -462,6 +466,30 @@ class Builtins:
     def _len(self, values: List[Value], _: SourceLocation) -> Value:
         return Value(TYPE_INT, len(values))
 
+    def _slen(
+        self,
+        _: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        text = self._expect_str(args[0], "SLEN", location)
+        return Value(TYPE_INT, len(text))
+
+    def _ilen(
+        self,
+        _: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        number = self._expect_int(args[0], "ILEN", location)
+        magnitude = abs(number)
+        length = 1 if magnitude == 0 else magnitude.bit_length()
+        return Value(TYPE_INT, length)
+
     def _join(self, values: List[Value], location: SourceLocation) -> Value:
         if not values:
             raise ASMRuntimeError("JOIN requires at least one argument", rewrite_rule="JOIN")
@@ -598,6 +626,39 @@ class Builtins:
             return Value(TYPE_INT, 1 if location.file == "<string>" else 0)
         return Value(TYPE_INT, 1 if os.path.abspath(location.file) == root else 0)
 
+    def _os(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        __loc: SourceLocation,
+    ) -> Value:
+        # Return a short lowercase host OS family string as STR.
+        plat = sys.platform.lower()
+        if plat.startswith("win") or plat.startswith("cygwin"):
+            fam = "win"
+        elif plat.startswith("linux"):
+            fam = "linux"
+        elif plat.startswith("darwin"):
+            fam = "macos"
+        elif plat.startswith("aix") or plat.startswith("freebsd") or plat.startswith("openbsd"):
+            fam = "unix"
+        else:
+            # Fallback to platform.system() for additional hints
+            p = platform.system().lower()
+            if "windows" in p:
+                fam = "win"
+            elif "linux" in p:
+                fam = "linux"
+            elif "darwin" in p or "mac" in p:
+                fam = "macos"
+            elif p:
+                fam = p
+            else:
+                fam = "unix"
+        return Value(TYPE_STR, fam)
+
     def _import(
         self,
         interpreter: "Interpreter",
@@ -696,7 +757,7 @@ class Builtins:
                 rendered.append(arg.value)  # type: ignore[arg-type]
             else:
                 rendered.append(str(arg.value))
-        text = " ".join(rendered)
+        text = "".join(rendered)
         interpreter.output_sink(text)
         interpreter.io_log.append({"event": "PRINT", "values": [arg.value for arg in args]})
         return Value(TYPE_INT, 0)
@@ -831,7 +892,7 @@ class Builtins:
         path = self._expect_str(args[0], "EXISTFILE", location)
         return Value(TYPE_INT, 1 if os.path.exists(path) else 0)
 
-    def _run(
+    def _cl(
         self,
         interpreter: "Interpreter",
         args: List[Value],
@@ -840,15 +901,32 @@ class Builtins:
         location: SourceLocation,
     ) -> Value:
         # Execute a shell command and return its exit code as INT.
-        cmd = self._expect_str(args[0], "RUN", location)
+        # Capture stdout/stderr so the REPL can display results without
+        # spawning a visible console window on Windows.
+        cmd = self._expect_str(args[0], "CL", location)
         try:
-            # Use the system shell to run the provided command string.
-            completed = subprocess.run(cmd, shell=True)
+            # Use text mode for captured output.
+            run_kwargs = {"shell": True, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
+            # On Windows, avoid creating a visible console window for subprocesses.
+            if platform.system().lower().startswith("win"):
+                run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            completed = subprocess.run(cmd, **run_kwargs)
             code = completed.returncode
+            out = completed.stdout or ""
+            err = completed.stderr or ""
         except OSError as exc:
-            raise ASMRuntimeError(f"RUN failed: {exc}", location=location, rewrite_rule="RUN")
-        # Record the run event for deterministic logging/replay
-        interpreter.io_log.append({"event": "RUN", "cmd": cmd, "code": code})
+            raise ASMRuntimeError(f"CL failed: {exc}", location=location, rewrite_rule="CL")
+
+        # Record the CL event for deterministic logging/replay, including captured output.
+        interpreter.io_log.append({"event": "CL", "cmd": cmd, "code": code, "stdout": out, "stderr": err})
+
+        # Forward captured output to the interpreter's output sink so REPL users see it.
+        if out:
+            interpreter.output_sink(out)
+        if err:
+            # Send stderr to the same sink; callers can choose how to display it.
+            interpreter.output_sink(err)
+
         # Normalize return to INT
         return Value(TYPE_INT, int(code))
 
