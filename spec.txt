@@ -592,11 +592,11 @@ Notes:
   purposes.
 
 Example invocations (illustrative):
-- File mode: 'interpreter program.asm'
-- Source-string mode: 'interpreter -source "foo = INPUT\nPRINT(foo)"
+- File mode: 'asmln program.asmln'
+- Source-string mode: 'asmln -source "foo = INPUT\nPRINT(foo)"
   -verbose'
 
-- REPL / Interactive mode: 'interpreter' (no program argument)
+- REPL / Interactive mode: 'asmln' (no program argument)
 
 REPL (Interactive Mode)
 -----------------------
@@ -636,7 +636,7 @@ semantics as file-mode execution. The following rules describe REPL behaviour:
   available.
 
 Notes and examples:
-- Start REPL: 'interpreter'
+- Start REPL: 'asmln'
 - Exit via meta-command: type '.exit' or press Ctrl-D (EOF)
 - Exit programmatically: 'EXIT()' — this immediately terminates the
   interpreter and returns the specified exit code to the shell, just like in
@@ -834,7 +834,7 @@ Host and environment information:
   call takes no arguments and returns a STR.
 
 Control / Function / Statement Signatures (statement position)
-- Assignment: 'TYPE ; identifier = expression' on first use; subsequent
+- Assignment: 'TYPE : identifier = expression' on first use; subsequent
   assignments omit TYPE but must match the original type
 - Block: '[ statement1 ... statementN ]' or '{ statement1 ... statementN }'
 - 'IF(condition)[ block ]'
