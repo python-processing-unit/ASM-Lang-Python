@@ -5,6 +5,7 @@ IMPORT(prime)
 IMPORT(decimal)
 
 FUNC RUN_TESTS():INT{
+    PRINT("Running library tests...")
     # Collection basics
     INT: coll = collection.COL_EMPTY()
     ASSERT( EQ( collection.GET_COUNT(coll), 0 ) )
@@ -31,6 +32,8 @@ FUNC RUN_TESTS():INT{
     INT: new_coll = DIV(pop_res, POW(10, 1000000))
     ASSERT( EQ( collection.GET_COUNT(new_coll), 10 ) )  # count == 2
 
+    PRINT("Collection tests passed.")
+
     # PRNG reproducibility (LCG)
     prng.PRNG_SEED(1010)   # seed = 10
     INT: a = prng.PRNG_NEXT()
@@ -38,12 +41,16 @@ FUNC RUN_TESTS():INT{
     INT: b = prng.PRNG_NEXT()
     ASSERT( EQ(a, b) )
 
+    PRINT("PRNG tests passed.")
+
     # CSPRNG reproducibility (ChaCha-based)
     csprng.CS_PRNG_SEED(101)  # seed = 5
     INT: x = csprng.CS_PRNG_NEXT()
     csprng.CS_PRNG_SEED(101)
     INT: y = csprng.CS_PRNG_NEXT()
     ASSERT( EQ(x, y) )
+
+    PRINT("CSPRNG tests passed.")
 
     # Prime library tests
     # Basic primality checks
@@ -64,14 +71,18 @@ FUNC RUN_TESTS():INT{
     ASSERT( EQ( collection.COL_GET(factors, 0), 10 ) )
     ASSERT( EQ( collection.COL_GET(factors, 1), 101 ) )
 
+    PRINT("Prime library tests passed.")
+
     # Decimal library tests
     ASSERT(EQ(decimal.INT_TO_DEC(100),"4"))
     ASSERT(EQ(decimal.DEC_TO_INT("4"),100))
     ASSERT(EQ(decimal.INT_TO_DEC(-100),"-4"))
     ASSERT(EQ(decimal.DEC_TO_INT("-4"),-100))
 
+    PRINT("Decimal library tests passed.")
+
     # If we reach here all tests passed; print success code and return
-    PRINT(1)
+    PRINT("All tests passed.")
     RETURN(0)
 }
 

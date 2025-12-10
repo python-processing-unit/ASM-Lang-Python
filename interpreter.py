@@ -5,6 +5,7 @@ import math
 import os
 import sys
 import platform
+import codecs
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -96,6 +97,8 @@ class JumpSignal(Exception):
 class Environment:
     parent: Optional["Environment"] = None
     values: Dict[str, Value] = field(default_factory=dict)
+    frozen: set = field(default_factory=set)
+    permafrozen: set = field(default_factory=set)
 
     def _find_env(self, name: str) -> Optional["Environment"]:
         env: Optional[Environment] = self
@@ -109,6 +112,11 @@ class Environment:
         env = self._find_env(name)
         if env is not None:
             existing = env.values[name]
+            if name in env.frozen or name in env.permafrozen:
+                raise ASMRuntimeError(
+                    f"Identifier '{name}' is frozen and cannot be reassigned",
+                    rewrite_rule="ASSIGN",
+                )
             if declared_type and existing.type != declared_type:
                 raise ASMRuntimeError(
                     f"Type mismatch for '{name}': previously declared as {existing.type}",
@@ -143,6 +151,8 @@ class Environment:
     def delete(self, name: str) -> None:
         env = self._find_env(name)
         if env is not None:
+            if name in env.frozen or name in env.permafrozen:
+                raise ASMRuntimeError(f"Identifier '{name}' is frozen and cannot be deleted", rewrite_rule="DEL")
             del env.values[name]
             return
         raise ASMRuntimeError(f"Cannot delete undefined identifier '{name}'", rewrite_rule="DEL")
@@ -152,6 +162,31 @@ class Environment:
 
     def snapshot(self) -> Dict[str, str]:
         return {k: f"{v.type}:{v.value}" for k, v in self.values.items()}
+
+    def freeze(self, name: str) -> None:
+        env = self._find_env(name)
+        if env is None:
+            raise ASMRuntimeError(f"Cannot freeze undefined identifier '{name}'", rewrite_rule="FREEZE")
+        env.frozen.add(name)
+
+    def thaw(self, name: str) -> None:
+        env = self._find_env(name)
+        if env is None:
+            raise ASMRuntimeError(f"Cannot thaw undefined identifier '{name}'", rewrite_rule="THAW")
+        if name in env.permafrozen:
+            raise ASMRuntimeError(
+                f"Identifier '{name}' is permanently frozen and cannot be thawed",
+                rewrite_rule="THAW",
+            )
+        # silently succeed if not frozen
+        env.frozen.discard(name)
+
+    def permafreeze(self, name: str) -> None:
+        env = self._find_env(name)
+        if env is None:
+            raise ASMRuntimeError(f"Cannot permafreeze undefined identifier '{name}'", rewrite_rule="PERMAFREEZE")
+        env.frozen.add(name)
+        env.permafrozen.add(name)
 
 
 @dataclass
@@ -297,11 +332,17 @@ class Builtins:
         self._register_custom("OS", 0, 0, self._os)
         self._register_custom("IMPORT", 1, 1, self._import)
         self._register_custom("RUN", 1, 1, self._run)
-        self._register_custom("INPUT", 0, 0, self._input)
+        self._register_custom("INPUT", 0, 1, self._input)
         self._register_custom("PRINT", 0, None, self._print)
         self._register_custom("ASSERT", 1, 1, self._assert)
         self._register_custom("DEL", 1, 1, self._delete)
+        self._register_custom("FREEZE", 1, 1, self._freeze)
+        self._register_custom("THAW", 1, 1, self._thaw)
+        self._register_custom("PERMAFREEZE", 1, 1, self._permafreeze)
+        self._register_custom("FROZEN", 1, 1, self._frozen)
+        self._register_custom("PERMAFROZEN", 1, 1, self._permafrozen)
         self._register_custom("EXIST", 1, 1, self._exist)
+        self._register_custom("EXPORT", 2, 2, self._export)
         self._register_custom("ISINT", 1, 1, self._isint)
         self._register_custom("ISSTR", 1, 1, self._isstr)
         self._register_custom("READFILE", 1, 1, self._readfile)
@@ -309,6 +350,8 @@ class Builtins:
         self._register_custom("EXISTFILE", 1, 1, self._existfile)
         self._register_custom("CL", 1, 1, self._cl)
         self._register_custom("EXIT", 0, 1, self._exit)
+        self._register_custom("SHUSH", 0, 0, self._shush)
+        self._register_custom("UNSHUSH", 0, 0, self._unshush)
 
     def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
         def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
@@ -673,6 +716,21 @@ class Builtins:
             raise ASMRuntimeError("IMPORT expects module name identifier", location=location, rewrite_rule="IMPORT")
 
         module_name = arg_nodes[0].name
+        # If module was already imported earlier in this interpreter instance,
+        # reuse the same Environment and function objects so all importers
+        # observe the same namespace/instance.
+        if module_name in interpreter.module_cache:
+            cached_env = interpreter.module_cache[module_name]
+            # Ensure module functions are registered in the interpreter.functions map
+            for fn in interpreter.module_functions.get(module_name, []):
+                if fn.name not in interpreter.functions:
+                    interpreter.functions[fn.name] = fn
+
+            for k, v in cached_env.values.items():
+                dotted = f"{module_name}.{k}"
+                env.set(dotted, v, declared_type=v.type)
+            return Value(TYPE_INT, 0)
+
         base_dir = os.getcwd() if location.file == "<string>" else os.path.dirname(os.path.abspath(location.file))
         module_path = os.path.join(base_dir, f"{module_name}.asmln")
 
@@ -702,27 +760,39 @@ class Builtins:
             interpreter.functions = prev_functions
             raise
 
+        # Collect functions that were added by executing the module
         new_funcs = {n: f for n, f in interpreter.functions.items() if n not in prev_functions}
+        registered_functions: List[Function] = []
         for name, fn in new_funcs.items():
             dotted_name = f"{module_name}.{name}"
             if "." in name:
-                interpreter.functions[dotted_name] = Function(
+                created = Function(
                     name=dotted_name,
                     params=fn.params,
                     return_type=fn.return_type,
                     body=fn.body,
                     closure=fn.closure,
                 )
+                interpreter.functions[dotted_name] = created
+                registered_functions.append(created)
             else:
+                # move unqualified function into module-qualified function
                 interpreter.functions.pop(name, None)
-                interpreter.functions[dotted_name] = Function(
+                created = Function(
                     name=dotted_name,
                     params=fn.params,
                     return_type=fn.return_type,
                     body=fn.body,
                     closure=module_env,
                 )
+                interpreter.functions[dotted_name] = created
+                registered_functions.append(created)
 
+        # Store module env and functions into the interpreter cache for reuse
+        interpreter.module_cache[module_name] = module_env
+        interpreter.module_functions[module_name] = registered_functions
+
+        # Export top-level bindings from the module under the dotted namespace
         for k, v in module_env.values.items():
             dotted = f"{module_name}.{k}"
             env.set(dotted, v, declared_type=v.type)
@@ -748,7 +818,15 @@ class Builtins:
 
         # Execute parsed statements in the caller's environment so that
         # assignments and function definitions are visible to the caller.
-        interpreter._execute_block(program.statements, env)
+        # RUN is explicitly allowed to produce console output even when
+        # the interpreter is currently shushed; temporarily disable
+        # shushing while executing the supplied source.
+        old_shush = interpreter.shushed
+        try:
+            interpreter.shushed = False
+            interpreter._execute_block(program.statements, env)
+        finally:
+            interpreter.shushed = old_shush
         return Value(TYPE_INT, 0)
 
     def _input(
@@ -759,8 +837,22 @@ class Builtins:
         ___: Environment,
         ____: SourceLocation,
     ) -> Value:
+        # Accept an optional prompt string. If provided, print it before
+        # requesting input so callers can display an inline prompt.
+        prompt: Optional[str] = None
+        if args:
+            prompt = self._expect_str(args[0], "INPUT", ____)
+            # Emit the prompt to the output sink so callers observing output
+            # (for example, a REPL) see it. This may include a trailing
+            # newline depending on the configured sink.
+            interpreter.output_sink(prompt)
+
         text = interpreter.input_provider()
-        interpreter.io_log.append({"event": "INPUT", "text": text})
+        # Record prompt when present to make I/O replay deterministic.
+        record: Dict[str, Any] = {"event": "INPUT", "text": text}
+        if prompt is not None:
+            record["prompt"] = prompt
+        interpreter.io_log.append(record)
         return Value(TYPE_STR, text)
 
     def _print(
@@ -781,7 +873,9 @@ class Builtins:
             else:
                 rendered.append(str(arg.value))
         text = "".join(rendered)
-        interpreter.output_sink(text)
+        # Forward to configured output sink only when not shushed.
+        if not interpreter.shushed:
+            interpreter.output_sink(text)
         interpreter.io_log.append({"event": "PRINT", "values": [arg.value for arg in args]})
         return Value(TYPE_INT, 0)
 
@@ -814,6 +908,102 @@ class Builtins:
         except ASMRuntimeError as err:
             err.location = location
             raise
+        return Value(TYPE_INT, 0)
+
+    def _freeze(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("FREEZE expects identifier", location=location, rewrite_rule="FREEZE")
+        name = arg_nodes[0].name
+        try:
+            env.freeze(name)
+        except ASMRuntimeError as err:
+            err.location = location
+            raise
+        return Value(TYPE_INT, 0)
+
+    def _thaw(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("THAW expects identifier", location=location, rewrite_rule="THAW")
+        name = arg_nodes[0].name
+        try:
+            env.thaw(name)
+        except ASMRuntimeError as err:
+            err.location = location
+            raise
+        return Value(TYPE_INT, 0)
+
+    def _permafreeze(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("PERMAFREEZE expects identifier", location=location, rewrite_rule="PERMAFREEZE")
+        name = arg_nodes[0].name
+        try:
+            env.permafreeze(name)
+        except ASMRuntimeError as err:
+            err.location = location
+            raise
+        return Value(TYPE_INT, 0)
+
+    def _export(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        # Expect two identifier nodes: the symbol to export and the module name.
+        if not arg_nodes or len(arg_nodes) < 2:
+            raise ASMRuntimeError("EXPORT expects two identifier arguments", location=location, rewrite_rule="EXPORT")
+        if not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("EXPORT expects an identifier as the first argument", location=location, rewrite_rule="EXPORT")
+        if not isinstance(arg_nodes[1], Identifier):
+            raise ASMRuntimeError("EXPORT expects an identifier as the second argument", location=location, rewrite_rule="EXPORT")
+
+        symbol_name = arg_nodes[0].name
+        module_name = arg_nodes[1].name
+
+        # Ensure the symbol exists in the caller's environment
+        if not env.has(symbol_name):
+            raise ASMRuntimeError(f"EXPORT: undefined symbol '{symbol_name}'", location=location, rewrite_rule="EXPORT")
+        try:
+            value = env.get(symbol_name)
+        except ASMRuntimeError as err:
+            err.location = location
+            raise
+
+        # Detect whether the module has been imported into this environment.
+        # We consider a module imported if there exists any dotted binding
+        # beginning with 'module_name.' in the current environment or if
+        # any function name is registered under that module prefix.
+        prefix = f"{module_name}."
+        module_present = any(k.startswith(prefix) for k in env.values.keys()) or any(k.startswith(prefix) for k in interpreter.functions.keys())
+        if not module_present:
+            raise ASMRuntimeError(f"Module '{module_name}' not imported", location=location, rewrite_rule="EXPORT")
+
+        dotted = f"{module_name}.{symbol_name}"
+        # Create or update the dotted binding in the caller's environment.
+        env.set(dotted, value, declared_type=value.type)
         return Value(TYPE_INT, 0)
 
     def _exist(
@@ -871,6 +1061,43 @@ class Builtins:
             raise
         return Value(TYPE_INT, 1 if val.type == TYPE_STR else 0)
 
+    def _frozen(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        # Expect an identifier node so we examine whether the symbol is frozen
+        if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("FROZEN requires an identifier argument", location=location, rewrite_rule="FROZEN")
+        name = arg_nodes[0].name
+        env_found = env._find_env(name)
+        if env_found is None:
+            return Value(TYPE_INT, 0)
+        # Permafrozen takes precedence: return -1 for permanently-frozen
+        if name in env_found.permafrozen:
+            return Value(TYPE_INT, -1)
+        return Value(TYPE_INT, 1 if name in env_found.frozen else 0)
+
+    def _permafrozen(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        # Expect an identifier node so we examine whether the symbol is perma-frozen
+        if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("PERMAFROZEN requires an identifier argument", location=location, rewrite_rule="PERMAFROZEN")
+        name = arg_nodes[0].name
+        env_found = env._find_env(name)
+        if env_found is None:
+            return Value(TYPE_INT, 0)
+        return Value(TYPE_INT, 1 if name in env_found.permafrozen else 0)
+
     def _readfile(
         self,
         interpreter: "Interpreter",
@@ -881,10 +1108,23 @@ class Builtins:
     ) -> Value:
         path = self._expect_str(args[0], "READFILE", location)
         try:
-            with open(path, "r", encoding="utf-8") as handle:
-                data = handle.read()
+            with open(path, "rb") as handle:
+                raw = handle.read()
         except OSError as exc:
             raise ASMRuntimeError(f"Failed to read '{path}': {exc}", location=location, rewrite_rule="READFILE")
+
+        # Try to decode common encodings safely: UTF-8 (with or without BOM), UTF-16
+        try:
+            # utf-8-sig will strip a UTF-8 BOM if present
+            data = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                # Try UTF-16 (will handle BOMs for LE/BE)
+                data = raw.decode("utf-16")
+            except UnicodeDecodeError:
+                # Fallback: decode with replacement to avoid crashes
+                data = raw.decode("utf-8", errors="replace")
+
         return Value(TYPE_STR, data)
 
     def _writefile(
@@ -945,13 +1185,44 @@ class Builtins:
 
         # Forward captured output to the interpreter's output sink so REPL users see it.
         if out:
-            interpreter.output_sink(out)
+            if not interpreter.shushed:
+                interpreter.output_sink(out)
         if err:
             # Send stderr to the same sink; callers can choose how to display it.
-            interpreter.output_sink(err)
+            if not interpreter.shushed:
+                interpreter.output_sink(err)
 
         # Normalize return to INT
         return Value(TYPE_INT, int(code))
+
+    def _shush(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        ____: SourceLocation,
+    ) -> Value:
+        """SHUSH(): suppress forwarding console output (PRINT, CL, etc.).
+        INPUT prompts and RUN-invoked output remain visible.
+        """
+        interpreter.shushed = True
+        return Value(TYPE_INT, 0)
+
+    def _unshush(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        ____: SourceLocation,
+    ) -> Value:
+        """UNSHUSH(): re-enable forwarding of console output.
+        Clears the shush flag so subsequent PRINT/CL outputs are forwarded
+        to the configured output sink. Returns INT 0.
+        """
+        interpreter.shushed = False
+        return Value(TYPE_INT, 0)
 
     def _exit(
         self,
@@ -991,6 +1262,16 @@ class Interpreter:
         self.io_log: List[Dict[str, Any]] = []
         self.call_stack: List[Frame] = []
         self.frame_counter = 0
+        # When true, suppress forwarding of console output (PRINT, CL, etc.).
+        # INPUT prompts and output produced via RUN are still forwarded.
+        self.shushed: bool = False
+        # Cache imported modules so repeated IMPORTs return the same
+        # namespace/instance rather than re-executing the module.
+        # Keys are module identifiers (the name passed to IMPORT).
+        self.module_cache: Dict[str, Environment] = {}
+        # Keep any function objects created for modules so they can be
+        # re-registered if necessary without re-running module code.
+        self.module_functions: Dict[str, List[Function]] = {}
 
     def parse(self) -> Program:
         lexer = Lexer(self.source, self.filename)

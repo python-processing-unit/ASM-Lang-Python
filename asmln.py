@@ -19,14 +19,26 @@ def _parse_statements_from_source(text: str, filename: str) -> List[Statement]:
 
 def run_repl(verbose: bool) -> int:
     print("\x1b[38;2;153;221;255mASM-Lang\033[0m REPL. Enter statements, blank line to run buffer.")
-    interpreter = Interpreter(source="", filename="<repl>", verbose=verbose)
+    # Use "<string>" as the REPL's effective source filename so that MAIN() and imports behave
+    had_output = False
+    def _output_sink(text: str) -> None:
+        nonlocal had_output
+        had_output = True
+        print(text, end="")
+
+    interpreter = Interpreter(source="", filename="<string>", verbose=verbose, input_provider=(lambda: input()), output_sink=_output_sink)
     global_env = Environment()
-    global_frame = interpreter._new_frame("<repl>", global_env, None)
+    # Make the REPL top-level frame mimic script top-level frame
+    global_frame = interpreter._new_frame("<top-level>", global_env, None)
     interpreter.call_stack.append(global_frame)
     buffer: List[str] = []
 
     while True:
         prompt = "\x1b[38;2;153;221;255m>>>\033[0m " if not buffer else "\x1b[38;2;153;221;255m..>\033[0m "
+        if had_output:
+            # Ensure prompt starts on a fresh line if the program printed anything
+            print()
+            had_output = False
         try:
             line = input(prompt)
         except EOFError:
@@ -45,12 +57,13 @@ def run_repl(verbose: bool) -> int:
 
         if not buffer and stripped != "" and not is_block_start:
             try:
-                statements = _parse_statements_from_source(line, "<repl>")
+                statements = _parse_statements_from_source(line, "<string>")
                 try:
                     interpreter._execute_block(statements, global_env)
                 except ExitSignal as sig:
                     return sig.code
             except ASMParseError:
+                # If a single-line parse fails, treat it as start of multi-line input
                 buffer.append(line)
             continue
 
@@ -58,7 +71,7 @@ def run_repl(verbose: bool) -> int:
             source_text = "\n".join(buffer)
             buffer.clear()
             try:
-                statements = _parse_statements_from_source(source_text, "<repl>")
+                statements = _parse_statements_from_source(source_text, "<string>")
                 interpreter._execute_block(statements, global_env)
             except ExitSignal as sig:
                 return sig.code
@@ -69,12 +82,11 @@ def run_repl(verbose: bool) -> int:
                     error.step_index = interpreter.logger.entries[-1].step_index
                 formatter = TracebackFormatter(interpreter)
                 print(formatter.format_text(error, verbose=interpreter.verbose), file=sys.stderr)
+                # reset call stack to single top-level frame to keep REPL usable
                 interpreter.call_stack = [global_frame]
             continue
 
         buffer.append(line)
-
-    return 0
 
 
 def run_cli(argv: Optional[List[str]] = None) -> int:

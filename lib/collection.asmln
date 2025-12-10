@@ -1,3 +1,5 @@
+PRINT("WARNING: collection is slated for replacement by built-in tensors in the future.")
+
 FUNC POW2(INT:k):INT{
     RETURN( POW(10, k) )
 }

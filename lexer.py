@@ -82,7 +82,7 @@ class Lexer:
                 tokens.append(Token(symbols[ch], ch, self.line, self.column))
                 _advance()
                 continue
-            if ch == '"':
+            if ch in ('"', "'"):
                 tokens.append(self._consume_string())
                 continue
             if ch == "-":
@@ -111,11 +111,16 @@ class Lexer:
 
     def _consume_string(self) -> Token:
         line, col = self.line, self.column
+        opening = self._peek()
+        if opening not in ('"', "'"):
+            raise ASMParseError(
+                f"Expected string opening quote at {self.filename}:{line}:{col}"
+            )
         self._advance()  # consume opening quote
         chars: List[str] = []
         while not self._eof:
             ch = self._peek()
-            if ch == '"':
+            if ch == opening:
                 self._advance()
                 return Token("STRING", "".join(chars), line, col)
             if ch == "\n":

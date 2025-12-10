@@ -133,9 +133,12 @@ dash is part of the literal, not an operator) followed by optional spaces,
 tabs, or carriage returns and then a non-empty sequence of '{0,1}'. A '-'
 that does not immediately introduce a literal is a syntax error.
 
-String literal: a sequence of ASCII characters enclosed in double quotation
-marks '"' with no escape processing. Newlines are not permitted inside string
-literals. The literal's value is the contained character sequence.
+String literal: a sequence of ASCII characters enclosed in either double
+quotation marks ('"') or single quotation marks ("'") with no escape
+processing. A string opened with one delimiter must be closed with the same
+delimiter; other quotation characters appearing inside the string are treated
+as ordinary characters. Newlines are not permitted inside string literals.
+The literal's value is the contained character sequence.
 
 Every runtime value has a static type: INT or STR. Integers are
 conceptually unbounded mathematical integers. Strings are byte strings of
@@ -214,9 +217,13 @@ Conversion operators:
   passing an INT raises a runtime error. Non-letter characters are left
   unchanged.
 
-Input, output, and assertions:
-- INPUT() returns a STR containing the raw input line (no implicit numeric
-  conversion). The I/O event is recorded for replay.
+- Input, output, and assertions:
+- INPUT(prompt):STR — Accepts an optional STR argument 'prompt'. When a
+  prompt is supplied, the interpreter prints the prompt inline (so a REPL
+  or other output sink can display it) before reading a line of input.
+  In all cases 'INPUT' returns a STR containing the raw input line (no
+  implicit numeric conversion). The I/O event is recorded for replay and,
+  when a prompt was supplied, the recorded event includes the prompt text.
 - PRINT(a1, ..., aN) accepts INT or STR. INT arguments are rendered in binary
   (with '-' for negatives); STR arguments are emitted as-is. The return value
   is INT 0.
@@ -243,8 +250,77 @@ File operations:
   I/O log containing the command text and returned exit code, enabling
   deterministic logging and replay.
 
+- SHUSH():INT — Suppresses forwarding of console output to the configured
+  output sink. While shushed, calls that would normally print to the
+  console (for example, 'PRINT' and output captured from 'CL') do not
+  forward their text to the interpreter's output sink, though the
+  interpreter continues to record the corresponding I/O events in the
+  execution log for deterministic replay. 'INPUT' prompts are still
+  forwarded even when shushed. The 'RUN' operator temporarily disables
+  shushing for the duration of the executed source, so any output produced
+  by code run via 'RUN' is forwarded regardless of the current shush
+  state. 'SHUSH' takes no arguments and returns INT 0 on success.
+
+- UNSHUSH():INT — Re-enables forwarding of console output that was
+  previously suppressed by 'SHUSH'. Calling 'UNSHUSH' clears the shush
+  state so subsequent side-effecting calls that normally produce console
+  output (for example, 'PRINT' and output captured from 'CL') are
+  forwarded to the configured output sink. 'UNSHUSH' takes no arguments
+  and returns INT 0 on success. The interpreter continues to record I/O
+  events in the execution log for deterministic replay; 'INPUT' prompts
+  and 'RUN' behaviour are unchanged (that is, 'INPUT' is always
+  forwarded and 'RUN' still temporarily disables shushing while it runs).
+
 Other operators (unchanged): IMPORT, MAIN, DEL, EXIST, and EXIT retain their
 previous meanings but now operate in a typed environment.
+
+- FREEZE(symbol):INT — Marks the identifier 'symbol' as frozen. The first
+  argument must be an identifier (not a string literal). On success 'FREEZE'
+  returns INT 0. Once a binding is frozen, any attempt to reassign it (via
+  '=' assignment) or to delete it ('DEL') raises a runtime error (assign
+  attempts signal rewrite: 'ASSIGN'; deletion attempts signal rewrite:
+  'DEL'). 'FREEZE' locates the binding in the usual lexical environment
+  chain and freezes that specific binding; if the identifier is undefined,
+  the call raises a runtime error (rewrite: 'FREEZE').
+
+- THAW(symbol):INT — Unfreezes a previously-frozen identifier. The single
+  argument must be an identifier (not a string literal). On success 'THAW'
+  returns INT 0. If the identifier is undefined the call raises a runtime
+  error (rewrite: 'THAW'). If the identifier has been permanently frozen by
+  'PERMAFREEZE', calling 'THAW' raises a runtime error and the binding
+  remains frozen (rewrite: 'THAW'). Calling 'THAW' on an identifier that is
+  not frozen is a no-op and succeeds.
+
+- PERMAFREEZE(symbol):INT — Permanently freezes the identifier 'symbol'. The
+  argument must be an identifier (not a string literal). On success
+  'PERMAFREEZE' returns INT 0. A permanently-frozen identifier cannot later
+  be thawed; attempts to call 'THAW' on such an identifier raise a runtime
+  error (rewrite: 'THAW'). As with 'FREEZE', 'PERMAFREEZE' locates the
+  binding in the lexical environment chain and applies the permanent-freeze
+  to that specific binding; if the identifier is undefined the call raises
+  a runtime error (rewrite: 'PERMAFREEZE').
+
+- FROZEN(symbol):INT — Returns INT -1 when the named identifier binding is
+  permanently frozen (was previously frozen via 'PERMAFREEZE'). If the
+  binding is frozen but not permanently (was frozen via 'FREEZE') the call
+  returns INT 1. Otherwise it returns INT 0. The single argument must be an
+  identifier (not a string literal). If the identifier is undefined the call
+  returns INT 0.
+
+- PERMAFROZEN(symbol):INT — Returns INT 1 when the named identifier binding
+  is permanently frozen (was previously frozen via 'PERMAFREEZE'), otherwise
+  returns INT 0. The single argument must be an identifier (not a string
+  literal). If the identifier is undefined the call returns INT 0.
+
+ - EXPORT(symbol, module):INT — Adds the caller's binding for the identifier
+   'symbol' into the namespace of the imported module named by the identifier
+   'module'. The first argument must be an identifier (not a string literal);
+   its current value in the caller's environment is copied into the imported
+   module's namespace and becomes available as the qualified name
+   'module.symbol' in the caller's environment. The second argument must be
+   an identifier naming a previously-imported module; if the module has not
+   been imported yet, the interpreter raises a runtime error (rewrite: EXPORT).
+   'EXPORT' returns INT 0 on success.
 
 Host and environment information:
 - OS():STR — Returns a short, lowercase ASCII string identifying the host
@@ -252,44 +328,44 @@ Host and environment information:
   'linux' for Linux, 'macos' for macOS, and 'unix' for other Unix-like
   platforms. The call takes no arguments and returns a STR.
 
-'IMPORT(name)' loads and executes another source file as a distinct module
-namespace. The argument must be an identifier naming a module; the
+'IMPORT(name)' loads another source file and provides it as a distinct
+module namespace. The argument must be an identifier naming a module; the
 interpreter first looks for a file named '<name>.asmln' in the same
-directory as the current source file. When the current source is provided
-via the '-source' string literal mode, the primary search directory is the
-process's current working directory. If the module file is not found in
-that location, the interpreter will additionally attempt to load the file
+directory as the referring source file. When the referring source is
+provided via the '-source' string literal mode, the primary search
+directory is the process's current working directory. If the module file is
+not found there, the interpreter will additionally attempt to load the file
 from a 'lib' subdirectory located alongside the interpreter implementation
 (that is, '<interpreter_dir>/lib/<name>.asmln', where '<interpreter_dir>' is
 the directory containing the interpreter script or executable).
 
 The imported file is parsed and executed in its own isolated top-level
-environment: top-level assignments and function definitions in the imported
-module do not directly mutate the caller's environment. During execution
-inside the imported module, unqualified identifiers (for example, 'x' or
-'helper') refer to names in the module's own top-level namespace. Qualified
-identifiers (for example, 'other.FOO') refer only to the dotted names that
-the module itself has created or imported; in other words, a module may
-refer to its own imports via qualified names, and those qualified bindings
-are scoped to that module's namespace.
+environment on the first import during a given interpreter invocation: top-
+level assignments and function definitions in the imported module do not
+directly mutate the caller's environment during execution. During that
+execution unqualified identifiers (for example, 'x' or 'helper') refer to
+names in the module's own top-level namespace. Qualified identifiers
+(for example, 'other.FOO') refer only to the dotted names that the module
+itself has created or imported; those qualified bindings are scoped to the
+module's namespace.
 
-After the module finishes executing, each top-level binding exported by the
-module is made available to the importer under a dotted name formed by the
-module identifier and the exported symbol, for example 'module.FOO' or
-'module.bar'. If the imported module itself imported other modules, those
-nested qualified bindings are preserved under the importing module's
-namespace (for example, 'module.other.SYM' denotes a symbol that 'module'
-imported from 'other'). Callers must reference imported symbols using the
-qualified form (for example: 'IMPORT(module)' followed by 'module.FOO()'),
-which preserves a clear separation of namespaces between modules.
+After the module finishes executing the first time, the interpreter caches
+the module's top-level environment and the module-qualified function
+objects. Subsequent 'IMPORT' calls for the same module identifier within
+the same interpreter process reuse that cached namespace/instance and do not
+re-execute the module source. Callers importing the same module later will
+observe the same shared module environment (that is, the same binding
+objects and the same function objects) exposed under the dotted names
+('module.FOO', 'module.bar', etc.). If the module imported other modules
+during its execution, those nested qualified bindings are preserved in the
+cached namespace and remain accessible via the same dotted paths (for
+example, 'module.other.SYM').
 
-Each 'IMPORT' call executes the target module anew and then publishes its
-top-level bindings under the dotted module namespace in the caller's
-environment; there is no automatic caching or cycle detection. Importantly,
-IMPORT does not modify or remove the original bindings of modules that the
-imported module relied upon; instead, nested qualified names are exposed
-under the importer as dotted names rooted at the imported module's
-identifier.
+This caching behavior ensures that importing a module multiple times
+produces the same shared namespace instance for all importers. The
+interpreter does not automatically perform cycle detection beyond using the
+cached instance once execution has completed; careful module design should
+avoid import cycles where possible.
 
 'ASSERT(a)' checks that its argument is true in the Boolean sense. If 'a' is
 non-zero, execution proceeds normally; if 'a' is '0', the program crashes
