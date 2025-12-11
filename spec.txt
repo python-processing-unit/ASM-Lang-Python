@@ -16,12 +16,13 @@ replay.
 The language is a familiar statement-based, imperative language. Programs
 consist of variable declarations via assignment, expressions, and control-flow
 constructs such as 'IF', 'ELSIF', 'ELSE', 'WHILE', and 'FOR'. ASM-Lang now has
-two runtime data types: binary integers and strings. Identifiers, function
-parameters, and return values are statically typed; the type of every symbol
-must be declared when it is first introduced. Computation proceeds by
-evaluating expressions and executing statements in sequence, with explicit
-constructs for branching and looping. Input and output are modeled through
-built-in operators, in particular 'INPUT' and 'PRINT'.
+three runtime data types: binary integers (INT), strings (STR), and immutable
+non-scalar tensors (TNS). Identifiers, function parameters, and return values
+are statically typed; the type of every symbol must be declared when it is
+first introduced. Computation proceeds by evaluating expressions and executing
+statements in sequence, with explicit constructs for branching and looping.
+Input and output are modeled through built-in operators, in particular 'INPUT'
+and 'PRINT'.
 
 The interpreter compiles source code into a single initial configuration (the
 seed state), which includes the program code, an empty variable environment,
@@ -51,7 +52,7 @@ The program text is divided into several token kinds: binary integer literals
 ("\"", "'", Section 3.2); identifiers for variable names and user-defined
 function names (Section 2.5); keywords and built-ins (control-flow keywords,
 built-in operators and functions; see Sections 4 and 5); and delimiters, namely
-'(', ')', '{', '}', ',', ':', and '='.
+'(', ')', '{', '}', '[', ']', ',', ':', and '='.
 
 Keywords: The language's reserved keywords (for example, 'IF', 'WHILE', 'FUNC',
 etc.) are matched by the lexer exactly as listed in this specification and are
@@ -123,7 +124,8 @@ code.
 3. Data Model
 -------------
 
-ASM-Lang supports two literal data types: binary integers and strings.
+ASM-Lang supports three literal data types: binary integers, strings, and
+non-scalar tensors.
 
 Binary integer literal: an unsigned non-empty sequence of '{0,1}' (for example,
 '0', '1', '1011'), or a signed literal formed by a leading '-' (the dash is
@@ -138,17 +140,43 @@ delimiter; other quotation characters appearing inside the string are treated
 as ordinary characters. Newlines are not permitted inside string literals. The
 literal's value is the contained character sequence.
 
-Every runtime value has a static type: INT or STR. Integers are conceptually
-unbounded mathematical integers. Strings are byte strings of ASCII characters.
-Operations that would otherwise produce non-integer results are defined with
-explicit rounding behaviour (see Section 4.2) and operate only on INT values.
-When a Boolean interpretation is required, integers treat 0 as false and
-non-zero as true. For Boolean operators that accept strings (Section 4), an
-empty string is false and any non-empty string is true unless otherwise
-specified. Control-flow conditions ('IF', 'ELSIF', 'WHILE') and 'ASSERT'
-convert strings to integers using the same rules as the 'INT' built-in: if the
-string is empty, it converts to 0; if it consists only of '0' and '1', it
-converts to the corresponding binary integer; otherwise it converts to 1.
+Tensor literal: a non-empty bracketed collection of expressions. Each pair of
+matching brackets introduces a dimension; nested brackets must form a
+rectangular shape (all sublists at a given depth have the same length) or a
+syntax error is raised. The outermost bracket corresponds to dimension 1.
+Examples (lengths shown in binary):
+
+- `[0,1,10]` has shape `[11]` (one dimension of length three).
+- `[[0,1,10],[0,10,100]]` has shape `[10,11]`.
+- `[[[0,1,10],[1,10,100]]]` has shape `[1,10,11]`.
+
+Expressions inside a tensor literal may themselves evaluate to INT, STR, or
+TNS. If an element expression evaluates to a tensor value, it occupies a
+single position and does not contribute additional dimensions; only the
+explicit bracket structure determines the shape. A tensor literal that mixes
+sub-brackets of differing lengths is invalid (for example,
+`[[0,0,0],[1,1]]`).
+
+Tensor values are immutable and carry a fixed shape (dimension count and length
+per dimension). Each location in a tensor is statically typed by the value it
+first receives; attempting to write a different type to that location is a
+runtime error. Tensors are indexed with one-based indices. Negative indices
+address from the end of the corresponding dimension (for example, index -1 is
+the last element of that dimension); index 0 is invalid. Tensors may be
+re-assigned in two ways: binding a new tensor to the variable name, or writing
+through an index such as `tensor[dim1,...,dimN] = expr`. The latter constructs
+a new tensor value and rebinds the variable; the existing tensor value remains
+unchanged.
+
+Every runtime value has a static type: INT, STR, or TNS. Integers are
+conceptually unbounded mathematical integers. Strings are byte strings of ASCII
+characters. Tensors are immutable, non-scalar aggregates whose elements may be
+INT, STR, or TNS. When a Boolean interpretation is required, INT treats 0 as
+false and non-zero as true; STR treats the empty string as false and any
+non-empty string as true; TNS is true if any contained element is true by these
+rules, otherwise false. Control-flow conditions ('IF', 'ELSIF', 'WHILE') and
+'ASSERT' convert strings to integers using the same rules as the 'INT'
+built-in; tensors are first reduced to their Boolean truth value (1 or 0).
 
 
 4. Expressions and Operators
@@ -159,6 +187,12 @@ function-call style syntax of the form 'NAME(arg1, arg2, ..., argN)'. The
 argument list may be empty for certain functions such as 'INPUT'. Arguments are
 separated by commas, and spaces may appear around commas and inside parentheses
 without changing meaning. Each operator has either a fixed or a variable arity.
+
+Tensor indexing uses the expression form 'tensor[i1, i2, ..., iN]'. The number
+of indices must equal the tensor's dimension count. Indices are one-based; 0 is
+invalid. Negative indices address from the end of the dimension (for example,
+-1 is the last element). Attempting to index with an out-of-range position
+raises a runtime error.
 
 'IMPORT(name)' loads another source file and provides it as a distinct module
 namespace. The argument must be an identifier naming a module; the interpreter
@@ -233,14 +267,25 @@ expression statements such as calls to 'PRINT' whose result is ignored,
 control-flow constructs ('IF', 'ELSIF', 'ELSE', 'WHILE', and 'FOR'), and
 function definitions ('FUNC' declarations; see Section 6).
 
-Blocks group one or more statements and are enclosed in curly brackets: '{ statement1 ... statementN }'.
-Curly braces must match (that is, '{' closes with '}'). Blocks serve as the bodies of control-flow constructs and functions.
+Blocks group one or more statements and are enclosed in curly brackets:
+'{ statement1 ... statementN }'.
+Curly braces must match (that is, '{' closes with '}'). Blocks serve as the
+bodies of control-flow constructs and functions.
 
 Assignments have the syntax 'TYPE : identifier = expression' on first use,
-where TYPE is 'INT' or 'STR'. Spaces around the colon and equals sign are
-optional. Subsequent assignments to an existing identifier may omit the type
-but must preserve the original type. Variables are deallocated only when
+where TYPE is 'INT', 'STR', or 'TNS'. Spaces around the colon and equals sign
+are optional. Subsequent assignments to an existing identifier may omit the
+type but must preserve the original type. Variables are deallocated only when
 'DEL(identifier)' is executed.
+
+Tensor elements can be reassigned with the indexed form
+'identifier[i1,...,iN] = expression'. The base must be a previously-declared
+TNS binding. The indices must match the tensor's dimensionality, follow the
+same one-based/negative-index rules as ordinary indexing, and must reference an
+existing position. The element's original type cannot change: attempting to
+store a different type at that position is a runtime error. Indexed assignment
+creates a new tensor value and rebinds the identifier; the prior tensor value
+remains unchanged.
 
 The language provides 'IF', 'ELSIF', and 'ELSE' constructs for conditional
 execution. An 'IF' statement has the general form 'IF(condition){ block }'.
@@ -255,9 +300,10 @@ until one is non-zero; its block then executes and the chain terminates. If no
 'IF' or 'ELSIF' condition is satisfied and an 'ELSE' is present, the 'ELSE'
 block executes; if there is no 'ELSE', no block in the chain executes.
 
-Conditions accept INT or STR. STR conditions are first converted to INT using
-the 'INT' built-in rules (empty -> 0; binary string -> that integer; other
-non-empty -> 1) before truthiness is checked.
+Conditions accept INT, STR, or TNS. STR conditions are first converted to INT
+using the 'INT' built-in rules (empty -> 0; binary string -> that integer;
+other non-empty -> 1) before truthiness is checked. A TNS condition is true if
+any of its elements is true by the INT/STR truthiness rules.
 
 Loops are provided via 'WHILE' and 'FOR'. A 'WHILE' loop has the form
 'WHILE(condition){ block }'. On each iteration,
@@ -302,8 +348,8 @@ tracebacks remain deterministic.
 
 Functions are defined using the 'FUNC' keyword with explicit parameter and
 return types. The canonical positional-only form is
- 'FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R{ block }', where each 'Tk' and 'R' is
- either 'INT' or 'STR'. Parameters may also declare a call-time default value
+ 'FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R{ block }', where each 'Tk' and 'R'
+ is 'INT', 'STR', or 'TNS'. Parameters may also declare a call-time default value
  using 'Tk:arg=expr'. A parameter without a default is positional; a parameter
  with a default is keyword-capable. Positional parameters must appear before
  any parameters with defaults. Defining a function binds 'name' to a callable
@@ -329,7 +375,9 @@ evaluated left-to-right. The function body executes in a new environment
 statement is executed, the function terminates immediately and yields 'v'; the
 returned value must match the declared return type. If control reaches the end
 of the body without 'RETURN', the function returns a default value of the
-declared return type (0 for INT, "" for STR).
+declared return type (0 for INT, "" for STR). Functions whose return type is
+TNS must execute an explicit 'RETURN' with a tensor value; reaching the end of
+the body without returning is a runtime error for TNS-returning functions.
 
 Built-in operators and functions can be viewed as pre-defined functions
 provided by the runtime environment. User-defined functions share the same call
@@ -343,8 +391,8 @@ exception.
 -----------------------------
 
 A variable is created only when it is first assigned with an explicit type
-annotation of the form 'TYPE : name = expression', where TYPE is 'INT' or
-'STR'. For example: 'INT: counter = 0' or 'STR : message = "hi"'. Subsequent
+annotation of the form 'TYPE : name = expression', where TYPE is 'INT', 'STR',
+or 'TNS'. For example: 'INT: counter = 0' or 'STR : message = "hi"'. Subsequent
 assignments to the same name must match the declared type and may omit the type
 annotation ('counter = ADD(counter,1)'). Assigning to an undeclared name
 without a type annotation is a runtime error. A variable exists until
@@ -386,7 +434,6 @@ with the recorded inputs.
 The standard library is a group of modules for common use cases distributed
 with the interpreter.
 It includes modules for:
-- Collections: indexed lists of integers with efficient encoding and decoding.
 - CSPRNG: Cryptographically secure (ChaCha20) pseudorandom number generation
   with seed management.
 - Decimal: convert decimal strings to/from binary integers.
@@ -643,14 +690,18 @@ Operators, Functions, and Statements
 This section lists built-in functions, operators and statement signatures,
 along with a (somewhat) brief description of their behaviour.
 
+Type notation: union signatures such as 'INT|STR' restrict arguments to the
+listed types. 'ANY' now means 'INT', 'STR', or 'TNS' unless explicitly narrowed
+below.
+
 Function / Operator Signatures (expression position)
 - 'INPUT():STR' or 'INPUT(STR: s):STR' ; returns a STR from the input stream;
   use 'INT' to coerce to an integer when needed. The interpreter prints the
   prompt inline (so a REPL or other output sink can display it) before reading
   a line of input. The I/O event is recorded for replay and, when a prompt was
   supplied, the recorded event includes the prompt text.
-- 'PRINT(ANY: a1, ANY: a2, ..., ANY: aN):INT' ; prints INT/STR arguments
-  (side-effect), returns INT 0
+- 'PRINT(INT|STR: a1, INT|STR: a2, ..., INT|STR: aN):INT' ; prints INT/STR
+  arguments (side-effect), tensors are rejected; returns INT 0
 - 'RUN(STR: s)' ; Run a string as an ASM-Lang program within the current
   environment;
 - 'UPPER(STR: s):STR' ; STR -> uppercase STR; error if 's' is INT
@@ -676,6 +727,9 @@ Function / Operator Signatures (expression position)
 - 'ISSTR(SYMBOL: x):INT' ; returns '1' if the identifier 'x' exists and is of
   type STR, otherwise returns '0'. The argument must be an identifier;
   supplying any other expression is a runtime error.
+- 'ISTNS(SYMBOL: x):INT' ; returns '1' if the identifier 'x' exists and is of
+  type TNS, otherwise returns '0'. The argument must be an identifier; supplying
+  any other expression is a runtime error.
 - SLEN(STR: s):INT returns the length of the supplied STR in characters as an
   INT. The argument must be a STR; passing an INT raises a runtime error.
 - ILEN(INT: n):INT returns the length in binary digits of the absolute value of
@@ -702,8 +756,9 @@ Bitwise / Boolean
 - 'BNOT(INT: a):INT' ; bitwise NOT
 - 'SHL(INT: a, INT: b):INT' ; shift left
 - 'SHR(INT: a, INT: b):INT' ; shift right
-- 'SLICE(ANY: a, INT: hi, INT: lo):ANY' ; INT target -> bit-slice [hi:lo]; STR
-  target -> inclusive char-slice counting from the right (index 0 = last char).
+- 'SLICE(INT|STR: a, INT: hi, INT: lo):INT|STR' ; INT target -> bit-slice
+  [hi:lo]; STR target -> inclusive char-slice counting from the right (index 0
+  = last char). Tensors are not accepted.
 - 'AND(ANY: a1, ..., ANY: aN):INT' ; Boolean AND
 - 'OR(ANY: a1, ..., ANY: aN):INT' ; Boolean OR
 - 'XOR(ANY: a1, ..., ANY: aN):INT' ; Boolean XOR
@@ -717,21 +772,42 @@ Comparisons
 - 'LTE(INT: a, INT: b):INT' ; 1 if a <= b else 0
 
 Aggregates / Utilities
-- 'MAX(ANY: a1, ..., ANY: aN):ANY' ; INT -> numeric max; STR -> longest string;
-  mixing INT and STR is an error
-- 'MIN(ANY: a1, ..., ANY: aN):ANY' ; INT -> numeric min; STR -> shortest
-  string; mixing INT and STR is an error
+- 'MAX(INT|STR: a1, ..., INT|STR: aN):INT|STR' ; INT -> numeric max; STR ->
+  longest string; mixing INT and STR or supplying tensors is an error
+- 'MIN(INT|STR: a1, ..., INT|STR: aN):INT|STR' ; INT -> numeric min; STR ->
+  shortest string; mixing INT and STR or supplying tensors is an error
 - 'SUM(INT: a1, ..., INT: aN):INT' ; sum of the arguments
-- 'LEN(ANY: a1, ..., ANY: aN):INT' ; number of arguments (N), accepts INT or
-  STR
+- 'LEN(INT|STR: a1, ..., INT|STR: aN):INT' ; number of arguments (N), rejects
+  tensors
 - 'ALL(ANY: a1, ..., ANY: aN):INT' ; Boolean AND (empty string -> false,
   non-empty -> true)
 - 'ANY(ANY: a1, ..., ANY: aN):INT' ; Boolean OR (empty string -> false,
   non-empty -> true)
-- 'JOIN(ANY: a1, ANY: a2, ..., ANY: aN):ANY' ; INT -> concatenate binary
-  spellings with consistent
-  sign; STR -> concatenate strings; mixing INT and STR raises an error
+- 'JOIN(INT|STR: a1, INT|STR: a2, ..., INT|STR: aN):INT|STR' ; INT ->
+  concatenate binary spellings with consistent sign; STR -> concatenate
+  strings; mixing INT and STR or supplying tensors raises an error
 - 'PROD(INT: a1, ..., INT: aN):INT' ; product of the arguments
+
+Tensor operations
+- SHAPE(TNS: tensor):TNS — Returns the tensor's shape as a 1D tensor of INT
+  lengths (one entry per dimension).
+- TLEN(TNS: tensor, INT: dim):INT — Returns the length of the specified
+  1-based dimension. Errors if 'dim' is out of range.
+- FILL(TNS: tensor, ANY: value):TNS — Returns a new tensor with the same shape
+  as 'tensor', filled with 'value'. The supplied value's type must match the
+  existing element type at every position.
+- TNS(TNS: shape, ANY: value):TNS — Creates a new tensor with the shape
+  described by a 1D tensor of positive INT lengths, filled with 'value'.
+- MADD/MSUB/MMUL/MDIV(TNS: x, TNS: y):TNS — Elementwise addition, subtraction,
+  multiplication, and integer division. Shapes must match; all elements must
+  be INT. MDIV raises on division by zero.
+- MSUM(TNS: t1, ..., TNS: tN):TNS — Elementwise sum across tensors. Shapes
+  must match; elements must be INT.
+- MPROD(TNS: t1, ..., TNS: tN):TNS — Elementwise product across tensors.
+  Shapes must match; elements must be INT.
+- TADD/TSUB/TMUL/TDIV/TPOW(TNS: x, INT: y):TNS — Elementwise INT-scalar add,
+  subtract, multiply, divide, and exponentiate. Division by zero and negative
+  exponents are errors (matching 'DIV'/'POW' semantics).
 
 Logarithms
 - 'LOG(INT: a):INT' ; floor(log2(a)) for a > 0
@@ -829,7 +905,10 @@ Host and environment information:
 
 Control / Function / Statement Signatures (statement position)
 - Assignment: 'TYPE : identifier = expression' on first use; subsequent
-  assignments omit TYPE but must match the original type
+  assignments omit TYPE but must match the original type. TYPE is 'INT', 'STR',
+  or 'TNS'. Tensor elements may be reassigned with 'identifier[i1,...,iN] =
+  expression' (indices are 1-based with negative-index support, and the stored
+  type at that element must not change).
 - Block: '{ statement1 ... statementN }'
 - 'IF(condition){ block }'
   (optional 'ELSIF(condition){ block }' ... 'ELSE{ block }')
@@ -837,8 +916,10 @@ Control / Function / Statement Signatures (statement position)
 - 'FOR(counter, INT: target){ block }' ; 'counter' initialized to 0, loop until
   counter >= target
 'FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R{ block }' ; typed function
-  definition with return type R; optional defaults use 'Tk:arg=expr' and must
-  appear only after all positional parameters
+  definition with return type R ('INT', 'STR', or 'TNS'); optional defaults use
+  'Tk:arg=expr' and must appear only after all positional parameters. Functions
+  with return type TNS must explicitly execute 'RETURN(value)'; there is no
+  implicit default tensor value.
 - 'RETURN(ANY: a)' ; return from function with value 'a'
 - 'BREAK(INT: n)' ; break out of the innermost 'n' enclosing loops; raises a
   runtime error if 'n' ≤ 0 or if 'n' is greater than the current loop nesting
@@ -858,7 +939,8 @@ Control / Function / Statement Signatures (statement position)
 Notes
 - Built-ins are statically typed. Boolean contexts treat INT 0 as false and
   non-zero as true; STR is false when empty and true when non-empty unless a
-  rule explicitly converts via 'INT'.
+  rule explicitly converts via 'INT'. A TNS is true if any element is true by
+  those INT/STR rules.
 - Argument evaluation order: left-to-right.
 - User-defined functions use the same call syntax as built-ins; keyword
   arguments are permitted only after positional arguments and only for

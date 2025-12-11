@@ -116,6 +116,23 @@ class Expression(Node):
 
 
 @dataclass
+class TensorLiteral(Expression):
+    items: List["Expression"]
+
+
+@dataclass
+class IndexExpression(Expression):
+    base: Expression
+    indices: List[Expression]
+
+
+@dataclass
+class TensorSetStatement(Statement):
+    target: IndexExpression
+    value: "Expression"
+
+
+@dataclass
 class Literal(Expression):
     value: Union[int, str]
     literal_type: str
@@ -163,6 +180,8 @@ class Parser:
         if self._is_typed_assignment_start():
             return self._parse_typed_assignment()
         token = self._peek()
+        if self._looks_like_index_assignment():
+            return self._parse_index_assignment()
         if token.type == "FUNC":
             return self._parse_func()
         if token.type == "IF":
@@ -197,6 +216,12 @@ class Parser:
         type_token = self._consume_type_token()
         self._consume("COLON")
         return self._parse_assignment(type_token.value)
+
+    def _parse_index_assignment(self) -> TensorSetStatement:
+        target = self._parse_index_expression()
+        equals_token = self._consume("EQUALS")
+        value_expr = self._parse_expression()
+        return TensorSetStatement(location=self._location_from_token(equals_token), target=target, value=value_expr)
 
     def _parse_func(self) -> FuncDef:
         keyword = self._consume("FUNC")
@@ -299,6 +324,12 @@ class Parser:
         return Block(location=self._location_from_token(start), statements=statements)
 
     def _parse_expression(self) -> Expression:
+        expr = self._parse_primary()
+        while self._peek().type == "LBRACKET":
+            expr = self._parse_index_suffix(expr)
+        return expr
+
+    def _parse_primary(self) -> Expression:
         token = self._peek()
         if token.type == "NUMBER":
             number: Token = self._consume("NUMBER")
@@ -313,6 +344,8 @@ class Parser:
         if token.type == "STRING":
             string_token = self._consume("STRING")
             return Literal(location=self._location_from_token(string_token), value=string_token.value, literal_type="STR")
+        if token.type == "LBRACKET":
+            return self._parse_tensor_literal()
         if token.type == "IDENT":
             ident: Token = self._consume("IDENT")
             location: SourceLocation = self._location_from_token(ident)
@@ -344,11 +377,89 @@ class Parser:
             return expr
         raise ASMParseError(f"Unexpected token {token.type} in expression at line {token.line}")
 
+    def _parse_index_suffix(self, base: Expression) -> IndexExpression:
+        lbracket = self._consume("LBRACKET")
+        indices: List[Expression] = []
+        if self._peek().type != "RBRACKET":
+            while True:
+                indices.append(self._parse_expression())
+                if not self._match("COMMA"):
+                    break
+        self._consume("RBRACKET")
+        return IndexExpression(location=self._location_from_token(lbracket), base=base, indices=indices)
+
+    def _parse_index_expression(self) -> IndexExpression:
+        expr = self._parse_primary()
+        if self._peek().type != "LBRACKET":
+            raise ASMParseError(f"Expected '[' in indexed assignment at line {self._peek().line}")
+        expr = self._parse_index_suffix(expr)
+        while self._peek().type == "LBRACKET":
+            expr = self._parse_index_suffix(expr)
+        if not isinstance(expr, IndexExpression):
+            raise ASMParseError(f"Invalid indexed assignment at line {self._peek().line}")
+        return expr
+
+    def _parse_tensor_literal(self) -> TensorLiteral:
+        lbracket = self._consume("LBRACKET")
+        items: List[Expression] = []
+        if self._peek().type != "RBRACKET":
+            while True:
+                items.append(self._parse_expression())
+                if not self._match("COMMA"):
+                    break
+        self._consume("RBRACKET")
+        return TensorLiteral(location=self._location_from_token(lbracket), items=items)
+
     def _parse_parenthesized_expression(self) -> Expression:
         self._consume("LPAREN")
         expr = self._parse_expression()
         self._consume("RPAREN")
         return expr
+
+    def _looks_like_index_assignment(self) -> bool:
+        i = self.index
+        tokens = self.tokens
+        if i >= len(tokens) or tokens[i].type != "IDENT":
+            return False
+        i += 1
+        if i >= len(tokens) or tokens[i].type != "LBRACKET":
+            return False
+
+        # Walk balanced brackets to find the end of the indexed target.
+        depth = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok.type == "LBRACKET":
+                depth += 1
+            elif tok.type == "RBRACKET":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+        if depth != 0:
+            return False
+
+        # Support additional bracketed suffixes like a[1][2].
+        while i < len(tokens) and tokens[i].type == "LBRACKET":
+            depth = 0
+            i += 1
+            while i < len(tokens):
+                tok = tokens[i]
+                if tok.type == "LBRACKET":
+                    depth += 1
+                elif tok.type == "RBRACKET":
+                    depth -= 1
+                    if depth == 0:
+                        i += 1
+                        break
+                i += 1
+            if depth != 0:
+                return False
+
+        while i < len(tokens) and tokens[i].type == "NEWLINE":
+            i += 1
+        return i < len(tokens) and tokens[i].type == "EQUALS"
 
     def _consume(self, token_type: str) -> Token:
         token = self._peek()
@@ -382,13 +493,13 @@ class Parser:
 
     def _consume_type_token(self) -> Token:
         token = self._consume("IDENT")
-        if token.value not in {"INT", "STR"}:
+        if token.value not in {"INT", "STR", "TNS"}:
             raise ASMParseError(f"Unknown type '{token.value}' at line {token.line}")
         return token
 
     def _is_typed_assignment_start(self) -> bool:
         current = self._peek()
-        if current.type != "IDENT" or current.value not in {"INT", "STR"}:
+        if current.type != "IDENT" or current.value not in {"INT", "STR", "TNS"}:
             return False
         if self.index + 1 >= len(self.tokens):
             return False

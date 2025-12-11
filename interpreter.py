@@ -7,7 +7,7 @@ import sys
 import platform
 import codecs
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from lexer import ASMError, ASMParseError, Lexer
 from parser import (
@@ -23,6 +23,7 @@ from parser import (
     GotoStatement,
     GotopointStatement,
     Identifier,
+    IndexExpression,
     IfBranch,
     IfStatement,
     Literal,
@@ -32,6 +33,8 @@ from parser import (
     ReturnStatement,
     SourceLocation,
     Statement,
+    TensorLiteral,
+    TensorSetStatement,
     WhileStatement,
     ContinueStatement,
 )
@@ -39,12 +42,19 @@ from parser import (
 
 TYPE_INT = "INT"
 TYPE_STR = "STR"
+TYPE_TNS = "TNS"
+
+
+@dataclass(frozen=True)
+class Tensor:
+    shape: List[int]
+    data: List["Value"]
 
 
 @dataclass
 class Value:
     type: str
-    value: Union[int, str]
+    value: Union[int, str, Tensor]
 
 
 class ASMRuntimeError(ASMError):
@@ -161,7 +171,13 @@ class Environment:
         return self._find_env(name) is not None
 
     def snapshot(self) -> Dict[str, str]:
-        return {k: f"{v.type}:{v.value}" for k, v in self.values.items()}
+        def _render(val: Value) -> str:
+            if val.type == TYPE_TNS and isinstance(val.value, Tensor):
+                dims = ",".join(str(d) for d in val.value.shape)
+                return f"{val.type}:[{dims}]"
+            return f"{val.type}:{val.value}"
+
+        return {k: _render(v) for k, v in self.values.items()}
 
     def freeze(self, name: str) -> None:
         env = self._find_env(name)
@@ -345,6 +361,7 @@ class Builtins:
         self._register_custom("EXPORT", 2, 2, self._export)
         self._register_custom("ISINT", 1, 1, self._isint)
         self._register_custom("ISSTR", 1, 1, self._isstr)
+        self._register_custom("ISTNS", 1, 1, self._istns)
         self._register_custom("READFILE", 1, 1, self._readfile)
         self._register_custom("WRITEFILE", 2, 2, self._writefile)
         self._register_custom("EXISTFILE", 1, 1, self._existfile)
@@ -352,6 +369,21 @@ class Builtins:
         self._register_custom("EXIT", 0, 1, self._exit)
         self._register_custom("SHUSH", 0, 0, self._shush)
         self._register_custom("UNSHUSH", 0, 0, self._unshush)
+        self._register_custom("SHAPE", 1, 1, self._shape)
+        self._register_custom("TLEN", 2, 2, self._tlen)
+        self._register_custom("FILL", 2, 2, self._fill)
+        self._register_custom("TNS", 2, 2, self._tns)
+        self._register_custom("MADD", 2, 2, self._madd)
+        self._register_custom("MSUB", 2, 2, self._msub)
+        self._register_custom("MMUL", 2, 2, self._mmul)
+        self._register_custom("MDIV", 2, 2, self._mdiv)
+        self._register_variadic("MSUM", 1, self._msum)
+        self._register_variadic("MPROD", 1, self._mprod)
+        self._register_custom("TADD", 2, 2, self._tadd)
+        self._register_custom("TSUB", 2, 2, self._tsub)
+        self._register_custom("TMUL", 2, 2, self._tmul)
+        self._register_custom("TDIV", 2, 2, self._tdiv)
+        self._register_custom("TPOW", 2, 2, self._tpow)
 
     def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
         def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
@@ -407,11 +439,20 @@ class Builtins:
         assert isinstance(value.value, str)
         return value.value
 
+    def _expect_tns(self, value: Value, rule: str, location: SourceLocation) -> Tensor:
+        if value.type != TYPE_TNS:
+            raise ASMRuntimeError(f"{rule} expects tensor arguments", location=location, rewrite_rule=rule)
+        assert isinstance(value.value, Tensor)
+        return value.value
+
     def _as_bool_value(self, value: Value) -> int:
         if value.type == TYPE_INT:
             return 0 if value.value == 0 else 1
         if value.type == TYPE_STR:
             return 0 if value.value == "" else 1
+        if value.type == TYPE_TNS:
+            assert isinstance(value.value, Tensor)
+            return 1 if any(self._as_bool_value(item) for item in value.value.data) else 0
         return 0
 
     def _condition_from_value(self, value: Value) -> int:
@@ -424,6 +465,8 @@ class Builtins:
             if set(text).issubset({"0", "1"}):
                 return int(text, 2)
             return 1
+        if value.type == TYPE_TNS:
+            return self._as_bool_value(value)
         return 0
 
     def _safe_div(self, a: int, b: int) -> int:
@@ -480,6 +523,8 @@ class Builtins:
         if not values:
             raise ASMRuntimeError("MAX requires at least one argument", rewrite_rule="MAX")
         first_type = values[0].type
+        if first_type == TYPE_TNS:
+            raise ASMRuntimeError("MAX cannot operate on tensors", rewrite_rule="MAX", location=location)
         if any(v.type != first_type for v in values):
             raise ASMRuntimeError("MAX cannot mix integers and strings", rewrite_rule="MAX", location=location)
         if first_type == TYPE_INT:
@@ -493,6 +538,8 @@ class Builtins:
         if not values:
             raise ASMRuntimeError("MIN requires at least one argument", rewrite_rule="MIN")
         first_type = values[0].type
+        if first_type == TYPE_TNS:
+            raise ASMRuntimeError("MIN cannot operate on tensors", rewrite_rule="MIN", location=location)
         if any(v.type != first_type for v in values):
             raise ASMRuntimeError("MIN cannot mix integers and strings", rewrite_rule="MIN", location=location)
         if first_type == TYPE_INT:
@@ -509,6 +556,9 @@ class Builtins:
         return Value(TYPE_INT, 1 if all(self._as_bool_value(v) for v in values) else 0)
 
     def _len(self, values: List[Value], _: SourceLocation) -> Value:
+        for v in values:
+            if v.type not in (TYPE_INT, TYPE_STR):
+                raise ASMRuntimeError("LEN accepts only INT or STR arguments", rewrite_rule="LEN")
         return Value(TYPE_INT, len(values))
 
     def _slen(
@@ -539,6 +589,8 @@ class Builtins:
         if not values:
             raise ASMRuntimeError("JOIN requires at least one argument", rewrite_rule="JOIN")
         first_type = values[0].type
+        if first_type == TYPE_TNS:
+            raise ASMRuntimeError("JOIN cannot operate on tensors", rewrite_rule="JOIN", location=location)
         if any(v.type != first_type for v in values):
             raise ASMRuntimeError("JOIN cannot mix integers and strings", rewrite_rule="JOIN", location=location)
         if first_type == TYPE_STR:
@@ -571,10 +623,14 @@ class Builtins:
     def _not(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
         return Value(TYPE_INT, 1 if self._as_bool_value(args[0]) == 0 else 0)
 
-    def _eq(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
+    def _eq(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
         a, b = args
         if a.type != b.type:
             return Value(TYPE_INT, 0)
+        if a.type == TYPE_TNS:
+            assert isinstance(a.value, Tensor)
+            assert isinstance(b.value, Tensor)
+            return Value(TYPE_INT, 1 if interpreter._tensor_equal(a.value, b.value) else 0)
         return Value(TYPE_INT, 1 if a.value == b.value else 0)
 
     def _slice(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
@@ -863,6 +919,7 @@ class Builtins:
         ___: Environment,
         ____: SourceLocation,
     ) -> Value:
+        loc = ____
         rendered: List[str] = []
         for arg in args:
             if arg.type == TYPE_INT:
@@ -871,7 +928,7 @@ class Builtins:
             elif arg.type == TYPE_STR:
                 rendered.append(arg.value)  # type: ignore[arg-type]
             else:
-                rendered.append(str(arg.value))
+                raise ASMRuntimeError("PRINT accepts INT or STR arguments", location=loc, rewrite_rule="PRINT")
         text = "".join(rendered)
         # Forward to configured output sink only when not shushed.
         if not interpreter.shushed:
@@ -1061,6 +1118,26 @@ class Builtins:
             raise
         return Value(TYPE_INT, 1 if val.type == TYPE_STR else 0)
 
+    def _istns(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("ISTNS requires an identifier argument", location=location, rewrite_rule="ISTNS")
+        name = arg_nodes[0].name
+        if not env.has(name):
+            return Value(TYPE_INT, 0)
+        try:
+            val = env.get(name)
+        except ASMRuntimeError as err:
+            err.location = location
+            raise
+        return Value(TYPE_INT, 1 if val.type == TYPE_TNS else 0)
+
     def _frozen(
         self,
         interpreter: "Interpreter",
@@ -1154,6 +1231,235 @@ class Builtins:
     ) -> Value:
         path = self._expect_str(args[0], "EXISTFILE", location)
         return Value(TYPE_INT, 1 if os.path.exists(path) else 0)
+
+    # Tensor helpers
+    def _shape_from_tensor(self, tensor: Tensor, rule: str, location: SourceLocation) -> List[int]:
+        if len(tensor.shape) != 1:
+            raise ASMRuntimeError(f"{rule} shape must be a 1D tensor", location=location, rewrite_rule=rule)
+        dims: List[int] = []
+        for entry in tensor.data:
+            dim = self._expect_int(entry, rule, location)
+            if dim <= 0:
+                raise ASMRuntimeError("Tensor dimensions must be positive", location=location, rewrite_rule=rule)
+            dims.append(dim)
+        if not dims:
+            raise ASMRuntimeError("Tensor shape must have at least one dimension", location=location, rewrite_rule=rule)
+        return dims
+
+    def _map_tensor_int_binary(self, x: Tensor, y: Tensor, rule: str, location: SourceLocation, op: Callable[[int, int], int]) -> Tensor:
+        if x.shape != y.shape:
+            raise ASMRuntimeError(f"{rule} requires tensors with identical shapes", location=location, rewrite_rule=rule)
+        data: List[Value] = []
+        for a, b in zip(x.data, y.data):
+            ai = self._expect_int(a, rule, location)
+            bi = self._expect_int(b, rule, location)
+            data.append(Value(TYPE_INT, op(ai, bi)))
+        return Tensor(shape=list(x.shape), data=data)
+
+    def _map_tensor_int_scalar(self, tensor: Tensor, scalar: int, rule: str, location: SourceLocation, op: Callable[[int, int], int]) -> Tensor:
+        data: List[Value] = []
+        for entry in tensor.data:
+            val = self._expect_int(entry, rule, location)
+            data.append(Value(TYPE_INT, op(val, scalar)))
+        return Tensor(shape=list(tensor.shape), data=data)
+
+    def _ensure_tensor_ints(self, tensor: Tensor, rule: str, location: SourceLocation) -> None:
+        for entry in tensor.data:
+            self._expect_int(entry, rule, location)
+
+    # Tensor built-ins
+    def _shape(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "SHAPE", location)
+        shape_data = [Value(TYPE_INT, dim) for dim in tensor.shape]
+        return Value(TYPE_TNS, Tensor(shape=[len(shape_data)], data=shape_data))
+
+    def _tlen(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "TLEN", location)
+        dim_index = self._expect_int(args[1], "TLEN", location)
+        if dim_index <= 0 or dim_index > len(tensor.shape):
+            raise ASMRuntimeError("TLEN dimension out of range", location=location, rewrite_rule="TLEN")
+        return Value(TYPE_INT, tensor.shape[dim_index - 1])
+
+    def _fill(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "FILL", location)
+        fill_value = args[1]
+        if any(entry.type != fill_value.type for entry in tensor.data):
+            raise ASMRuntimeError("FILL value type must match existing tensor element types", location=location, rewrite_rule="FILL")
+        new_data = [Value(fill_value.type, fill_value.value) for _ in tensor.data]
+        return Value(TYPE_TNS, Tensor(shape=list(tensor.shape), data=new_data))
+
+    def _tns(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        shape_val = self._expect_tns(args[0], "TNS", location)
+        shape = self._shape_from_tensor(shape_val, "TNS", location)
+        fill_value = args[1]
+        tensor = interpreter._make_tensor_from_shape(shape, fill_value, "TNS", location)
+        return Value(TYPE_TNS, tensor)
+
+    def _madd(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        x = self._expect_tns(args[0], "MADD", location)
+        y = self._expect_tns(args[1], "MADD", location)
+        tensor = self._map_tensor_int_binary(x, y, "MADD", location, lambda a, b: a + b)
+        return Value(TYPE_TNS, tensor)
+
+    def _msub(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        x = self._expect_tns(args[0], "MSUB", location)
+        y = self._expect_tns(args[1], "MSUB", location)
+        tensor = self._map_tensor_int_binary(x, y, "MSUB", location, lambda a, b: a - b)
+        return Value(TYPE_TNS, tensor)
+
+    def _mmul(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        x = self._expect_tns(args[0], "MMUL", location)
+        y = self._expect_tns(args[1], "MMUL", location)
+        tensor = self._map_tensor_int_binary(x, y, "MMUL", location, lambda a, b: a * b)
+        return Value(TYPE_TNS, tensor)
+
+    def _mdiv(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        x = self._expect_tns(args[0], "MDIV", location)
+        y = self._expect_tns(args[1], "MDIV", location)
+        def _div(a: int, b: int) -> int:
+            return self._safe_div(a, b)
+
+        tensor = self._map_tensor_int_binary(x, y, "MDIV", location, _div)
+        return Value(TYPE_TNS, tensor)
+
+    def _msum(self, values: List[Value], location: SourceLocation) -> Value:
+        tensors = [self._expect_tns(v, "MSUM", location) for v in values]
+        acc = tensors[0]
+        for tensor in tensors[1:]:
+            acc = self._map_tensor_int_binary(acc, tensor, "MSUM", location, lambda a, b: a + b)
+        return Value(TYPE_TNS, acc)
+
+    def _mprod(self, values: List[Value], location: SourceLocation) -> Value:
+        tensors = [self._expect_tns(v, "MPROD", location) for v in values]
+        acc = tensors[0]
+        for tensor in tensors[1:]:
+            acc = self._map_tensor_int_binary(acc, tensor, "MPROD", location, lambda a, b: a * b)
+        return Value(TYPE_TNS, acc)
+
+    def _tadd(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "TADD", location)
+        scalar = self._expect_int(args[1], "TADD", location)
+        result = self._map_tensor_int_scalar(tensor, scalar, "TADD", location, lambda a, b: a + b)
+        return Value(TYPE_TNS, result)
+
+    def _tsub(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "TSUB", location)
+        scalar = self._expect_int(args[1], "TSUB", location)
+        result = self._map_tensor_int_scalar(tensor, scalar, "TSUB", location, lambda a, b: a - b)
+        return Value(TYPE_TNS, result)
+
+    def _tmul(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "TMUL", location)
+        scalar = self._expect_int(args[1], "TMUL", location)
+        result = self._map_tensor_int_scalar(tensor, scalar, "TMUL", location, lambda a, b: a * b)
+        return Value(TYPE_TNS, result)
+
+    def _tdiv(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "TDIV", location)
+        scalar = self._expect_int(args[1], "TDIV", location)
+
+        def _div(val: int, sc: int) -> int:
+            return self._safe_div(val, sc)
+
+        result = self._map_tensor_int_scalar(tensor, scalar, "TDIV", location, _div)
+        return Value(TYPE_TNS, result)
+
+    def _tpow(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        tensor = self._expect_tns(args[0], "TPOW", location)
+        scalar = self._expect_int(args[1], "TPOW", location)
+        result = self._map_tensor_int_scalar(tensor, scalar, "TPOW", location, lambda a, b: self._safe_pow(a, b))
+        return Value(TYPE_TNS, result)
 
     def _cl(
         self,
@@ -1348,6 +1654,27 @@ class Interpreter:
             value = self._evaluate_expression(statement.expression, env)
             env.set(statement.target, value, declared_type=statement.declared_type)
             return
+        if isinstance(statement, TensorSetStatement):
+            base_expr, index_nodes = self._gather_index_chain(statement.target)
+            if not isinstance(base_expr, Identifier):
+                raise ASMRuntimeError(
+                    "Indexed assignment requires identifier base",
+                    location=statement.location,
+                    rewrite_rule="ASSIGN",
+                )
+            base_val = self._evaluate_expression(base_expr, env)
+            if base_val.type != TYPE_TNS:
+                raise ASMRuntimeError(
+                    "Indexed assignment requires a tensor base",
+                    location=statement.location,
+                    rewrite_rule="ASSIGN",
+                )
+            assert isinstance(base_val.value, Tensor)
+            indices = [self._expect_int(self._evaluate_expression(node, env), "ASSIGN", statement.location) for node in index_nodes]
+            new_value = self._evaluate_expression(statement.value, env)
+            updated = self._set_tensor_value(base_val.value, indices, new_value, statement.location)
+            env.set(base_expr.name, Value(TYPE_TNS, updated))
+            return
         if isinstance(statement, ExpressionStatement):
             self._evaluate_expression(statement.expression, env)
             return
@@ -1377,7 +1704,24 @@ class Interpreter:
             frame: Frame = self.call_stack[-1]
             if frame.name == "<top-level>":
                 raise ASMRuntimeError("RETURN outside of function", location=statement.location, rewrite_rule="RETURN")
-            value = self._evaluate_expression(statement.expression, env) if statement.expression else Value(TYPE_INT, 0)
+            if statement.expression:
+                value = self._evaluate_expression(statement.expression, env)
+            else:
+                fn = self.functions.get(frame.name)
+                if fn is None:
+                    value = Value(TYPE_INT, 0)
+                elif fn.return_type == TYPE_INT:
+                    value = Value(TYPE_INT, 0)
+                elif fn.return_type == TYPE_STR:
+                    value = Value(TYPE_STR, "")
+                elif fn.return_type == TYPE_TNS:
+                    raise ASMRuntimeError(
+                        "TNS functions must RETURN a tensor value",
+                        location=statement.location,
+                        rewrite_rule="RETURN",
+                    )
+                else:
+                    value = Value(TYPE_INT, 0)
             raise ReturnSignal(value)
         if isinstance(statement, BreakStatement):
             count_val = self._evaluate_expression(statement.expression, env)
@@ -1459,6 +1803,9 @@ class Interpreter:
             if set(text).issubset({"0", "1"}):
                 return int(text, 2)
             return 1
+        if value.type == TYPE_TNS:
+            assert isinstance(value.value, Tensor)
+            return 1 if self._tensor_truthy(value.value) else 0
         raise ASMRuntimeError("Unsupported type in condition", location=location)
 
     def _expect_int(self, value: Value, rule: str, location: Optional[SourceLocation]) -> int:
@@ -1466,9 +1813,132 @@ class Interpreter:
             raise ASMRuntimeError(f"{rule} expects integer value", location=location, rewrite_rule=rule)
         return value.value  # type: ignore[return-value]
 
+    def _tensor_total_size(self, shape: List[int]) -> int:
+        size = 1
+        for dim in shape:
+            size *= dim
+        return size
+
+    def _tensor_truthy(self, tensor: Tensor) -> bool:
+        for item in tensor.data:
+            if item.type == TYPE_INT and item.value != 0:
+                return True
+            if item.type == TYPE_STR and item.value != "":
+                return True
+            if item.type == TYPE_TNS and self._tensor_truthy(item.value):
+                return True
+        return False
+
+    def _values_equal(self, left: Value, right: Value) -> bool:
+        if left.type != right.type:
+            return False
+        if left.type == TYPE_TNS:
+            assert isinstance(left.value, Tensor)
+            assert isinstance(right.value, Tensor)
+            return self._tensor_equal(left.value, right.value)
+        return left.value == right.value
+
+    def _tensor_equal(self, left: Tensor, right: Tensor) -> bool:
+        if left.shape != right.shape:
+            return False
+        return all(self._values_equal(a, b) for a, b in zip(left.data, right.data))
+
+    def _validate_tensor_shape(self, shape: List[int], rule: str, location: SourceLocation) -> None:
+        if not shape:
+            raise ASMRuntimeError("Tensor shape must have at least one dimension", location=location, rewrite_rule=rule)
+        for dim in shape:
+            if dim <= 0:
+                raise ASMRuntimeError("Tensor dimensions must be positive", location=location, rewrite_rule=rule)
+
+    def _tensor_flat_index(self, tensor: Tensor, indices: List[int], rule: str, location: SourceLocation) -> int:
+        if len(indices) != len(tensor.shape):
+            raise ASMRuntimeError("Incorrect number of tensor indices", location=location, rewrite_rule=rule)
+        offset = 0
+        stride = 1
+        for dim_len, raw in zip(reversed(tensor.shape), reversed(indices)):
+            idx = raw
+            if idx == 0:
+                raise ASMRuntimeError("Tensor indices are 1-indexed", location=location, rewrite_rule=rule)
+            if idx < 0:
+                idx = dim_len + idx + 1
+            if idx <= 0 or idx > dim_len:
+                raise ASMRuntimeError("Tensor index out of range", location=location, rewrite_rule=rule)
+            offset += (idx - 1) * stride
+            stride *= dim_len
+        return offset
+
+    def _make_tensor_from_shape(self, shape: List[int], fill_value: Value, rule: str, location: SourceLocation) -> Tensor:
+        self._validate_tensor_shape(shape, rule, location)
+        total = self._tensor_total_size(shape)
+        # Duplicate scalar values to avoid accidental aliasing when tensors are nested.
+        def _clone(val: Value) -> Value:
+            if val.type == TYPE_TNS:
+                assert isinstance(val.value, Tensor)
+                return Value(TYPE_TNS, val.value)
+            return Value(val.type, val.value)
+
+        return Tensor(shape=list(shape), data=[_clone(fill_value) for _ in range(total)])
+
+    def _set_tensor_value(self, tensor: Tensor, indices: List[int], value: Value, location: SourceLocation) -> Tensor:
+        offset = self._tensor_flat_index(tensor, indices, "ASSIGN", location)
+        current = tensor.data[offset]
+        if current.type != value.type:
+            raise ASMRuntimeError("Tensor element type mismatch", location=location, rewrite_rule="ASSIGN")
+        new_data = list(tensor.data)
+        new_data[offset] = value
+        return Tensor(shape=list(tensor.shape), data=new_data)
+
+    def _build_tensor_from_literal(self, literal: TensorLiteral, env: Environment) -> Tensor:
+        items = literal.items
+        if not items:
+            raise ASMRuntimeError("Tensor literal cannot be empty", location=literal.location, rewrite_rule="TNS")
+        flat: List[Value] = []
+        subshape: Optional[List[int]] = None
+        for item in items:
+            if isinstance(item, TensorLiteral):
+                nested = self._build_tensor_from_literal(item, env)
+                if subshape is None:
+                    subshape = nested.shape
+                elif subshape != nested.shape:
+                    raise ASMRuntimeError("Inconsistent tensor shape", location=item.location, rewrite_rule="TNS")
+                flat.extend(nested.data)
+            else:
+                val = self._evaluate_expression(item, env)
+                if subshape is None:
+                    subshape = []
+                elif subshape != []:
+                    raise ASMRuntimeError("Inconsistent tensor shape", location=item.location, rewrite_rule="TNS")
+                flat.append(val)
+        shape = [len(items)] + (subshape or [])
+        self._validate_tensor_shape(shape, "TNS", literal.location)
+        expected = self._tensor_total_size(shape)
+        if len(flat) != expected:
+            raise ASMRuntimeError("Tensor literal size mismatch", location=literal.location, rewrite_rule="TNS")
+        return Tensor(shape=shape, data=flat)
+
+    def _gather_index_chain(self, expr: Expression) -> Tuple[Expression, List[Expression]]:
+        indices: List[Expression] = []
+        current = expr
+        while isinstance(current, IndexExpression):
+            indices = current.indices + indices
+            current = current.base
+        return current, indices
+
     def _evaluate_expression(self, expression: Expression, env: Environment) -> Value:
         if isinstance(expression, Literal):
             return Value(expression.literal_type, expression.value)
+        if isinstance(expression, TensorLiteral):
+            tensor = self._build_tensor_from_literal(expression, env)
+            return Value(TYPE_TNS, tensor)
+        if isinstance(expression, IndexExpression):
+            base_expr, index_nodes = self._gather_index_chain(expression)
+            base_val = self._evaluate_expression(base_expr, env)
+            if base_val.type != TYPE_TNS:
+                raise ASMRuntimeError("Indexed access requires a tensor", location=expression.location, rewrite_rule="INDEX")
+            assert isinstance(base_val.value, Tensor)
+            indices = [self._expect_int(self._evaluate_expression(idx, env), "INDEX", expression.location) for idx in index_nodes]
+            offset = self._tensor_flat_index(base_val.value, indices, "INDEX", expression.location)
+            return base_val.value.data[offset]
         if isinstance(expression, Identifier):
             try:
                 return env.get(expression.name)
@@ -1669,7 +2139,15 @@ class Interpreter:
             self.call_stack.pop()
             if function.return_type == TYPE_INT:
                 return Value(TYPE_INT, 0)
-            return Value(TYPE_STR, "")
+            if function.return_type == TYPE_STR:
+                return Value(TYPE_STR, "")
+            if function.return_type == TYPE_TNS:
+                raise ASMRuntimeError(
+                    f"Function {function.name} must return a tensor value",
+                    location=call_location,
+                    rewrite_rule=function.name,
+                )
+            return Value(TYPE_INT, 0)
 
     def _new_frame(self, name: str, env: Environment, call_location: Optional[SourceLocation]) -> Frame:
         frame_id = f"f_{self.frame_counter:04d}"

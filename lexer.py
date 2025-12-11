@@ -38,6 +38,8 @@ SYMBOLS = {
     ")": "RPAREN",
     "{": "LBRACE",
     "}": "RBRACE",
+    "[": "LBRACKET",
+    "]": "RBRACKET",
     ",": "COMMA",
     "=": "EQUALS",
     ":": "COLON",

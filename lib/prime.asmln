@@ -1,5 +1,3 @@
-IMPORT(collection)
-
 # Primality test for n
 FUNC IS_PRIME(INT:n):INT{
     IF(LTE(n,1)){
@@ -56,22 +54,56 @@ FUNC IS_MERSENNE_PRIME(INT:p):INT{
     }
 }
 
-FUNC FACTOR(INT:n):INT{
-    INT: coll = collection.COL_EMPTY()
+FUNC FACTOR(INT:n):TNS{
     IF(LTE(n,1)){
-        RETURN(coll)
+        TNS: empty = [0]
+        RETURN(empty)
     }
     INT: p = 10
+    INT: coll_len = 0
+    TNS: coll = [0]  # placeholder, real shape tracked by coll_len
     WHILE(LTE(MUL(p,p), n)){
         IF(EQ(MOD(n,p), 0)){
-            coll = collection.COL_PUSH(coll, p)
+            IF(EQ(coll_len, 0)){
+                TNS: first = [p]
+                coll = first
+                coll_len = 1
+            } ELSE {
+                INT: old_len = TLEN(coll, 1)
+                INT: new_len = ADD(old_len, 1)
+                TNS: new_coll = TNS([new_len], 0)
+                INT: i = 1
+                WHILE( LTE(i, old_len) ){
+                    new_coll[i] = coll[i]
+                    i = ADD(i, 1)
+                }
+                new_coll[new_len] = p
+                coll = new_coll
+                coll_len = new_len
+            }
             n = DIV(n, p)
         } ELSE {
             p = NEXT_PRIME( ADD(p, 1) )
         }
     }
     IF(GT(n,1)){
-        coll = collection.COL_PUSH(coll, n)
+        IF(EQ(coll_len, 0)){
+            TNS: last = [n]
+            coll = last
+            coll_len = 1
+        } ELSE {
+            INT: old_len2 = TLEN(coll, 1)
+            INT: new_len2 = ADD(old_len2, 1)
+            TNS: new_coll2 = TNS([new_len2], 0)
+            INT: j = 1
+            WHILE( LTE(j, old_len2) ){
+                new_coll2[j] = coll[j]
+                j = ADD(j, 1)
+            }
+            new_coll2[new_len2] = n
+            coll = new_coll2
+            coll_len = new_len2
+        }
     }
     RETURN(coll)
 }

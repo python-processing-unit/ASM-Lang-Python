@@ -1,5 +1,4 @@
 #ChaCha20-based cryptographically secure pseudorandom number generator
-IMPORT(collection)
 
 INT: MASK32 = SUB( POW(10,100000), 1 )  # 2^32-1
 
@@ -21,7 +20,7 @@ INT: ch_nonce0 = 0
 INT: ch_nonce1 = 0
 INT: ch_nonce2 = 0
 INT: ch_counter = 0
-INT: ch_buf = collection.COL_EMPTY()
+TNS: ch_buf = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
 INT: ch_buf_pos = 10000  # 16 -> force refill
 
 FUNC ROTL32(INT:x, INT:n):INT{
@@ -31,7 +30,7 @@ FUNC ROTL32(INT:x, INT:n):INT{
     RETURN( BOR(left, right) )
 }
 
-FUNC QR(INT:a, INT:b, INT:c, INT:d):INT{
+FUNC QR(INT:a, INT:b, INT:c, INT:d):TNS{
     a = BAND( ADD(a, b), MASK32 )
     d = ROTL32( BXOR(d, a), 10000 )   # 16
     c = BAND( ADD(c, d), MASK32 )
@@ -40,15 +39,11 @@ FUNC QR(INT:a, INT:b, INT:c, INT:d):INT{
     d = ROTL32( BXOR(d, a), 1000 )    # 8
     c = BAND( ADD(c, d), MASK32 )
     b = ROTL32( BXOR(b, c), 111 )     # 7
-    INT: coll = collection.COL_EMPTY()
-    coll = collection.COL_PUSH(coll, a)
-    coll = collection.COL_PUSH(coll, b)
-    coll = collection.COL_PUSH(coll, c)
-    coll = collection.COL_PUSH(coll, d)
+    TNS: coll = [a, b, c, d]
     RETURN(coll)
 }
 
-FUNC CHACHA_BLOCK():INT{
+FUNC CHACHA_BLOCK():TNS{
     INT: x0 = CH_CONST0
     INT: x1 = CH_CONST1
     INT: x2 = CH_CONST2
@@ -67,47 +62,47 @@ FUNC CHACHA_BLOCK():INT{
     INT: x15 = ch_nonce2
     INT: i = 0
     WHILE( LT(i, 1010) ){  # 10 double-rounds
-        INT: qr = QR(x0, x4, x8,  x12)
-        x0 = collection.COL_GET(qr,0)
-        x4 = collection.COL_GET(qr,1)
-        x8  = collection.COL_GET(qr,10)
-        x12 = collection.COL_GET(qr,11)
+        TNS: qr = QR(x0, x4, x8,  x12)
+        x0 = qr[1]
+        x4 = qr[10]
+        x8  = qr[11]
+        x12 = qr[100]
         qr = QR(x1, x5, x9,  x13)
-        x1 = collection.COL_GET(qr,0)
-        x5 = collection.COL_GET(qr,1)
-        x9  = collection.COL_GET(qr,10)
-        x13 = collection.COL_GET(qr,11)
+        x1 = qr[1]
+        x5 = qr[10]
+        x9  = qr[11]
+        x13 = qr[100]
         qr = QR(x2, x6, x10, x14)
-        x2 = collection.COL_GET(qr,0)
-        x6 = collection.COL_GET(qr,1)
-        x10 = collection.COL_GET(qr,10)
-        x14 = collection.COL_GET(qr,11)
+        x2 = qr[1]
+        x6 = qr[10]
+        x10 = qr[11]
+        x14 = qr[100]
         qr = QR(x3, x7, x11, x15)
-        x3 = collection.COL_GET(qr,0)
-        x7 = collection.COL_GET(qr,1)
-        x11 = collection.COL_GET(qr,10)
-        x15 = collection.COL_GET(qr,11)
+        x3 = qr[1]
+        x7 = qr[10]
+        x11 = qr[11]
+        x15 = qr[100]
 
         qr = QR(x0, x5, x10, x15)
-        x0 = collection.COL_GET(qr,0)
-        x5 = collection.COL_GET(qr,1)
-        x10 = collection.COL_GET(qr,10)
-        x15 = collection.COL_GET(qr,11)
+        x0 = qr[1]
+        x5 = qr[10]
+        x10 = qr[11]
+        x15 = qr[100]
         qr = QR(x1, x6, x11, x12)
-        x1 = collection.COL_GET(qr,0)
-        x6 = collection.COL_GET(qr,1)
-        x11 = collection.COL_GET(qr,10)
-        x12 = collection.COL_GET(qr,11)
+        x1 = qr[1]
+        x6 = qr[10]
+        x11 = qr[11]
+        x12 = qr[100]
         qr = QR(x2, x7, x8,  x13)
-        x2 = collection.COL_GET(qr,0)
-        x7 = collection.COL_GET(qr,1)
-        x8  = collection.COL_GET(qr,10)
-        x13 = collection.COL_GET(qr,11)
+        x2 = qr[1]
+        x7 = qr[10]
+        x8  = qr[11]
+        x13 = qr[100]
         qr = QR(x3, x4, x9,  x14)
-        x3 = collection.COL_GET(qr,0)
-        x4 = collection.COL_GET(qr,1)
-        x9  = collection.COL_GET(qr,10)
-        x14 = collection.COL_GET(qr,11)
+        x3 = qr[1]
+        x4 = qr[10]
+        x9  = qr[11]
+        x14 = qr[100]
 
         i = ADD(i, 1)
     }
@@ -129,23 +124,7 @@ FUNC CHACHA_BLOCK():INT{
     x14 = BAND( ADD(x14, ch_nonce1), MASK32 )
     x15 = BAND( ADD(x15, ch_nonce2), MASK32 )
 
-    INT: out = collection.COL_EMPTY()
-    out = collection.COL_PUSH(out, x0)
-    out = collection.COL_PUSH(out, x1)
-    out = collection.COL_PUSH(out, x2)
-    out = collection.COL_PUSH(out, x3)
-    out = collection.COL_PUSH(out, x4)
-    out = collection.COL_PUSH(out, x5)
-    out = collection.COL_PUSH(out, x6)
-    out = collection.COL_PUSH(out, x7)
-    out = collection.COL_PUSH(out, x8)
-    out = collection.COL_PUSH(out, x9)
-    out = collection.COL_PUSH(out, x10)
-    out = collection.COL_PUSH(out, x11)
-    out = collection.COL_PUSH(out, x12)
-    out = collection.COL_PUSH(out, x13)
-    out = collection.COL_PUSH(out, x14)
-    out = collection.COL_PUSH(out, x15)
+    TNS: out = [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15]
     RETURN(out)
 }
 
@@ -185,7 +164,7 @@ FUNC DERIVE_KEY_AND_NONCE(INT:seed):INT{
 FUNC CS_PRNG_SEED(INT:seed):INT{
     DERIVE_KEY_AND_NONCE(seed)
     ch_counter = 0
-    ch_buf = collection.COL_EMPTY()
+    ch_buf = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
     ch_buf_pos = 10000  # 16
     RETURN(ch_counter)
 }
@@ -194,7 +173,7 @@ FUNC CS_PRNG_NEXT():INT{
     IF( GTE(ch_buf_pos, 10000) ){  # 16
         REFILL_BUF()
     }
-    INT: v = collection.COL_GET(ch_buf, ch_buf_pos)
+    INT: v = ch_buf[ ADD(ch_buf_pos, 1) ]
     ch_buf_pos = ADD(ch_buf_pos, 1)
     RETURN(v)
 }
