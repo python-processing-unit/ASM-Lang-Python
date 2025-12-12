@@ -7,146 +7,146 @@ INT: MS_DEN = 1111101000  # 1000
 # Clamp audio-like values into a safe, conventional percent range [-100, 100].
 INT: AUDIO_MAX = 1100100  # 100
 
-FUNC AUDIO_CLAMP(INT:v):INT{
+FUNC AUDIO_CLAMP(INT: v):INT{
     IF(GT(v, AUDIO_MAX)){ RETURN(AUDIO_MAX) }
     IF(LT(v, NEG(AUDIO_MAX))){ RETURN(NEG(AUDIO_MAX)) }
     RETURN(v)
 }
 
-FUNC SQUARE(INT:freq, INT:ms, INT:amp, INT:sr):TNS{
-	ASSERT(GT(freq, 0))
-	ASSERT(GT(ms, 0))
-	ASSERT(GT(sr, 0))
-	INT: frames = DIV(MUL(sr, ms), MS_DEN)
+FUNC SQUARE(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
+    ASSERT(GT(freq, 0))
+    ASSERT(GT(ms, 0))
+    ASSERT(GT(sr, 0))
+    INT: frames = DIV(MUL(sr, ms), MS_DEN)
     TNS: shape = [frames]
-	TNS: out = TNS(shape, 0)
+    TNS: out = TNS(shape, 0)
     DEL(shape)
-	INT: period = CDIV(sr, freq)
-	IF(LTE(period, 0)){ RETURN(out) }
-	INT: half = DIV(period, 10)
-	INT: idx = 0
-	WHILE(LT(idx, frames)){
-		INT: pos = MOD(idx, period)
-		INT: v = amp
-		IF(GTE(pos, half)){ v = NEG(amp) }
+    INT: period = CDIV(sr, freq)
+    IF(LTE(period, 0)){ RETURN(out) }
+    INT: half = DIV(period, 10)
+    INT: idx = 0
+    WHILE(LT(idx, frames)){
+        INT: pos = MOD(idx, period)
+        INT: v = amp
+        IF(GTE(pos, half)){ v = NEG(amp) }
         out[ADD(idx, 1)] = AUDIO_CLAMP(v)
-		idx = ADD(idx, 1)
-	}
+        idx = ADD(idx, 1)
+    }
     DEL(frames)
     DEL(period)
     DEL(half)
     DEL(idx)
     DEL(pos)
     DEL(v)
-	RETURN(out)
+    RETURN(out)
 }
 
-FUNC SAWTOOTH(INT:freq, INT:ms, INT:amp, INT:sr):TNS{
-	ASSERT(GT(freq, 0))
-	ASSERT(GT(ms, 0))
-	ASSERT(GT(sr, 0))
-	INT: frames = DIV(MUL(sr, ms), MS_DEN)
+FUNC SAWTOOTH(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
+    ASSERT(GT(freq, 0))
+    ASSERT(GT(ms, 0))
+    ASSERT(GT(sr, 0))
+    INT: frames = DIV(MUL(sr, ms), MS_DEN)
     TNS: shape = [frames]
-	TNS: out = TNS(shape, 0)
-	DEL(shape)
-	INT: period = CDIV(sr, freq)
-	IF(LTE(period, 0)){ RETURN(out) }
-	INT: idx = 0
-	WHILE(LT(idx, frames)){
-		INT: pos = MOD(idx, period)
-		INT: num = MUL(MUL(MUL(pos, 100), amp), 1)
-		INT: tmp = DIV(num, period)
-		INT: v = SUB(tmp, amp)
+    TNS: out = TNS(shape, 0)
+    DEL(shape)
+    INT: period = CDIV(sr, freq)
+    IF(LTE(period, 0)){ RETURN(out) }
+    INT: idx = 0
+    WHILE(LT(idx, frames)){
+        INT: pos = MOD(idx, period)
+        INT: num = MUL(MUL(MUL(pos, 100), amp), 1)
+        INT: tmp = DIV(num, period)
+        INT: v = SUB(tmp, amp)
         out[ADD(idx, 1)] = AUDIO_CLAMP(v)
-		idx = ADD(idx, 1)
-	}
-	DEL(frames)
-	DEL(period)
-	DEL(idx)
-	DEL(pos)
-	DEL(num)
-	DEL(tmp)
-	DEL(v)
-	RETURN(out)
+        idx = ADD(idx, 1)
+    }
+    DEL(frames)
+    DEL(period)
+    DEL(idx)
+    DEL(pos)
+    DEL(num)
+    DEL(tmp)
+    DEL(v)
+    RETURN(out)
 }
 
-FUNC TRIANGLE(INT:freq, INT:ms, INT:amp, INT:sr):TNS{
-	ASSERT(GT(freq, 0))
-	ASSERT(GT(ms, 0))
-	ASSERT(GT(sr, 0))
-	INT: frames = DIV(MUL(sr, ms), MS_DEN)
+FUNC TRIANGLE(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
+    ASSERT(GT(freq, 0))
+    ASSERT(GT(ms, 0))
+    ASSERT(GT(sr, 0))
+    INT: frames = DIV(MUL(sr, ms), MS_DEN)
     TNS: shape = [frames]
-	TNS: out = TNS(shape, 0)
-	DEL(shape)
-	INT: period = CDIV(sr, freq)
-	IF(LTE(period, 0)){ RETURN(out) }
-	INT: half = DIV(period, 10)
-	INT: idx = 0
-	WHILE(LT(idx, frames)){
-		INT: pos = MOD(idx, period)
-		INT: v = 0
-		IF(LT(pos, half)){
-			INT: num = MUL(MUL(MUL(pos, 100), amp), 1)
-			INT: tmp = DIV(num, period)
-			v = ADD(NEG(amp), tmp)
-		}ELSE{
-			INT: t = SUB(pos, half)
-			INT: num = MUL(MUL(MUL(t, 100), amp), 1)
-			INT: tmp = DIV(num, period)
-			v = SUB(amp, tmp)
-		}
+    TNS: out = TNS(shape, 0)
+    DEL(shape)
+    INT: period = CDIV(sr, freq)
+    IF(LTE(period, 0)){ RETURN(out) }
+    INT: half = DIV(period, 10)
+    INT: idx = 0
+    WHILE(LT(idx, frames)){
+        INT: pos = MOD(idx, period)
+        INT: v = 0
+        IF(LT(pos, half)){
+            INT: num = MUL(MUL(MUL(pos, 100), amp), 1)
+            INT: tmp = DIV(num, period)
+            v = ADD(NEG(amp), tmp)
+        }ELSE{
+            INT: t = SUB(pos, half)
+            INT: num = MUL(MUL(MUL(t, 100), amp), 1)
+            INT: tmp = DIV(num, period)
+            v = SUB(amp, tmp)
+        }
         out[ADD(idx, 1)] = AUDIO_CLAMP(v)
-		idx = ADD(idx, 1)
-	}
-	DEL(frames)
-	DEL(period)
-	DEL(half)
-	DEL(idx)
-	DEL(pos)
-	DEL(v)
-	DEL(num)
-	DEL(tmp)
-	DEL(t)
-	RETURN(out)
+        idx = ADD(idx, 1)
+    }
+    DEL(frames)
+    DEL(period)
+    DEL(half)
+    DEL(idx)
+    DEL(pos)
+    DEL(v)
+    DEL(num)
+    DEL(tmp)
+    DEL(t)
+    RETURN(out)
 }
 
-FUNC SINE(INT:freq, INT:ms, INT:amp, INT:sr):TNS{
-	ASSERT(GT(freq, 0))
-	ASSERT(GT(ms, 0))
-	ASSERT(GT(sr, 0))
-	INT: frames = DIV(MUL(sr, ms), MS_DEN)
+FUNC SINE(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
+    ASSERT(GT(freq, 0))
+    ASSERT(GT(ms, 0))
+    ASSERT(GT(sr, 0))
+    INT: frames = DIV(MUL(sr, ms), MS_DEN)
     TNS: shape = [frames]
-	TNS: base = SAWTOOTH(freq, ms, amp, sr)
-	TNS: out = TNS(shape, 0)
-	DEL(shape)
-	INT: idx = 0
-	WHILE(LT(idx, frames)){
-		INT: i1 = ADD(idx, 1)
-		INT: previ = i1
-		IF(GT(i1, 1)){ previ = SUB(i1, 1) }
-		INT: nexti = i1
-		IF(LT(i1, frames)){ nexti = ADD(i1, 1) }
+    TNS: base = SAWTOOTH(freq, ms, amp, sr)
+    TNS: out = TNS(shape, 0)
+    DEL(shape)
+    INT: idx = 0
+    WHILE(LT(idx, frames)){
+        INT: i1 = ADD(idx, 1)
+        INT: previ = i1
+        IF(GT(i1, 1)){ previ = SUB(i1, 1) }
+        INT: nexti = i1
+        IF(LT(i1, frames)){ nexti = ADD(i1, 1) }
         INT: a = base[previ]
         INT: b = base[i1]
         INT: c = base[nexti]
-		INT: sum = ADD(ADD(a, b), c)
-		INT: v = DIV(sum, 11)
+        INT: sum = ADD(ADD(a, b), c)
+        INT: v = DIV(sum, 11)
         out[i1] = AUDIO_CLAMP(v)
-		idx = ADD(idx, 1)
-	}
-	DEL(frames)
-	DEL(idx)
-	DEL(i1)
-	DEL(previ)
-	DEL(nexti)
-	DEL(a)
-	DEL(b)
-	DEL(c)
-	DEL(sum)
-	RETURN(out)
+        idx = ADD(idx, 1)
+    }
+    DEL(frames)
+    DEL(idx)
+    DEL(i1)
+    DEL(previ)
+    DEL(nexti)
+    DEL(a)
+    DEL(b)
+    DEL(c)
+    DEL(sum)
+    RETURN(out)
 }
 
-FUNC PULSE(INT:freq, INT:ms, INT:amp, INT:sr, INT:duty):TNS{
+FUNC PULSE(INT: freq, INT: ms, INT: amp, INT: sr, INT: duty):TNS{
     ASSERT(GT(freq, 0))
     ASSERT(GT(ms, 0))
     ASSERT(GT(sr, 0))
@@ -178,7 +178,7 @@ FUNC PULSE(INT:freq, INT:ms, INT:amp, INT:sr, INT:duty):TNS{
 
 # Filters
 
-FUNC ENVELOPE_ADSR(TNS:shape, INT:attack, INT:decay, INT:sustain, INT:release):TNS{
+FUNC ENVELOPE_ADSR(TNS: shape, INT: attack, INT: decay, INT: sustain, INT: release):TNS{
     ASSERT(GTE(attack, 0))
     ASSERT(GTE(decay, 0))
     ASSERT(GTE(sustain, 0))
@@ -186,7 +186,11 @@ FUNC ENVELOPE_ADSR(TNS:shape, INT:attack, INT:decay, INT:sustain, INT:release):T
     # determine frames from shape tensor ([1, frames] expected)
     INT: slen = TLEN(shape, 1)
     INT: frames = 0
-    IF(EQ(slen, 1)){ frames = shape[1] }ELSE{ frames = shape[10] } # shape[10] -> shape[2] (binary '10')
+    IF(EQ(slen, 1)){
+        frames = shape[1]
+    } ELSE {
+        frames = shape[10]
+    } # shape[10] -> ^shape[2] (binary '10')
     TNS: out = TNS(shape, 0)
     INT: idx = 0
     # clamp segment lengths so they don't exceed frames
@@ -206,7 +210,7 @@ FUNC ENVELOPE_ADSR(TNS:shape, INT:attack, INT:decay, INT:sustain, INT:release):T
                 INT: num = MUL(i1, 100)
                 v = DIV(num, a)
             }
-        }ELSE{
+        } ELSE {
             INT: pos = SUB(idx, a)
             IF(LT(pos, d)){
                 # decay: ramp 100 -> sustain
@@ -244,7 +248,7 @@ FUNC ENVELOPE_ADSR(TNS:shape, INT:attack, INT:decay, INT:sustain, INT:release):T
     RETURN(out)
 }
 
-FUNC LOWPASS(TNS:inp, INT:cutoff, INT:sr):TNS{
+FUNC LOWPASS(TNS: inp, INT: cutoff, INT: sr):TNS{
     ASSERT(GT(cutoff, 0))
     ASSERT(GT(sr, 0))
     TNS: shape = SHAPE(inp)
@@ -284,7 +288,7 @@ FUNC LOWPASS(TNS:inp, INT:cutoff, INT:sr):TNS{
     RETURN(out)
 }
 
-FUNC HIGHPASS(TNS:inp, INT:cutoff, INT:sr):TNS{
+FUNC HIGHPASS(TNS: inp, INT: cutoff, INT: sr):TNS{
     # highpass = original - lowpass
     TNS: low = LOWPASS(inp, cutoff, sr)
     TNS: shape = SHAPE(inp)
