@@ -19,7 +19,7 @@ def _parse_statements_from_source(text: str, filename: str) -> List[Statement]:
 
 
 def run_repl(verbose: bool) -> int:
-    print("\x1b[38;2;153;221;255mASM-Lang\033[0m REPL. Enter statements, blank line to run buffer.")
+    print("\x1b[38;2;153;221;255mASM-Lang\033[0m REPL. Enter statements, blank line to run buffer.") # "ASM-Lang" in light blue
     # Use "<string>" as the REPL's effective source filename so that MAIN() and imports behave
     had_output = False
     def _output_sink(text: str) -> None:
@@ -35,7 +35,7 @@ def run_repl(verbose: bool) -> int:
     buffer: List[str] = []
 
     while True:
-        prompt = "\x1b[38;2;153;221;255m>>>\033[0m " if not buffer else "\x1b[38;2;153;221;255m..>\033[0m "
+        prompt = "\x1b[38;2;153;221;255m>>>\033[0m " if not buffer else "\x1b[38;2;153;221;255m..>\033[0m " # light blue
         if had_output:
             # Ensure prompt starts on a fresh line if the program printed anything
             print()

@@ -329,6 +329,7 @@ class Builtins:
         self._register_custom("OR", 2, 2, self._or)
         self._register_custom("XOR", 2, 2, self._xor)
         self._register_custom("NOT", 1, 1, self._not)
+        self._register_custom("BOOL", 1, 1, self._bool)
         self._register_custom("ARGV", 0, 0, self._argv)
         self._register_custom("EQ", 2, 2, self._eq)
         self._register_custom("IN", 2, 2, self._in)
@@ -705,6 +706,10 @@ class Builtins:
 
     def _not(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
         return Value(TYPE_INT, 1 if self._as_bool_value(args[0]) == 0 else 0)
+
+    def _bool(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, __loc: SourceLocation) -> Value:
+        # BOOL(ANY: item):INT -> truthiness of item (INT: nonzero, STR: non-empty, TNS: any true element)
+        return Value(TYPE_INT, 1 if self._as_bool_value(args[0]) != 0 else 0)
 
     def _eq(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
         a, b = args

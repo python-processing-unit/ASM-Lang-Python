@@ -1,5 +1,21 @@
 # Abstract State Machine Language Specification
 
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;700&display=swap');
+
+:root { --asm-default-text-color: rgb(153,221,255); }
+:root { --asm-default-background-color: rgb(34,34,34); }
+:root { --asm-keyword-background-color: rgb(60,60,60); }
+
+body { color: var(--asm-default-text-color); background-color: var(--asm-default-background-color); font-family: 'Open Sans', sans-serif; }
+code { color: var(--asm-default-text-color); background-color: var(--asm-keyword-background-color); font-family: 'Source Code Pro', monospace; }
+</style>
+
+<p align="center">
+  <img alt="ASM-Lang icon" src="./icon.png">
+</p>
+
 This document specifies an imperative programming language with a binary integer data model and an explicit small-step execution semantics. A program is compiled into an initial machine state (a seed configuration) and then executed solely by repeatedly applying a fixed, program-independent state-transition (rewrite) function. All intermediate states are (semi-)human-readable and serializable, and execution can be traced and replayed exactly, including I/O and nondeterministic choices, which are modeled explicitly for deterministic replay.
 
 ## 1. Overview
@@ -123,13 +139,7 @@ Every state produced during execution is serializable and human-readable. The in
 
 ## 8. Standard Library
 
-The standard library is a group of modules for common use cases distributed with the interpreter.
-It includes modules for:
-- CSPRNG: Cryptographically secure (ChaCha20) pseudorandom number generation with seed management.
-- Decimal: convert decimal strings to/from binary integers.
-- Prime: primality testing and prime number generation, along with factorization and other common prime utilities.
-- PRNG: Fast (LCG) pseudorandom number generation with seed management.
-- Waveforms: Waveforms generator functions.
+The standard library is a group of modules for common use cases distributed with the interpreter. at the ASM-Lang directory \lib (or /lib on non-Windows systems).
 
 ## 9. Tracebacks and Error Reporting
 
@@ -138,11 +148,11 @@ When a runtime error or exception occurs the interpreter must produce a determin
 ### 9.1 Traceback semantics (high level)
 
 
-GOTOPOINT and GOTO: Two additional control-flow primitives allow program execution to jump to a dynamically-registered program location. The statement form `GOTOPOINT(n)` evaluates the expression `n` and registers a gotopoint with that identifier at the point where the statement executes. Registration occurs at runtime when the `GOTOPOINT` statement executes; subsequent execution (including execution within loops or after imports) may depend on whether the gotopoint has been registered. Identifiers may be `INT` or `STR`; negative `INT` identifiers are invalid.
+`GOTOPOINT` and `GOTO`: Two additional control-flow primitives allow program execution to jump to a dynamically-registered program location. The statement form `GOTOPOINT(n)` evaluates the expression `n` and registers a gotopoint with that identifier at the point where the statement executes. Registration occurs at runtime when the `GOTOPOINT` statement executes; subsequent execution (including execution within loops or after imports) may depend on whether the gotopoint has been registered. Identifiers may be `INT` or `STR`; negative `INT` identifiers are invalid.
 
-The statement form `GOTO(n)` evaluates `n` at runtime and transfers execution to the previously-registered gotopoint whose identifier equals `n`, matching both type and value. If no gotopoint with that identifier has been registered in a scope visible to the jump target, the interpreter raises a runtime error. GOTO may jump forward or backward relative to the target gotopoint; jumping to an unregistered identifier is an error. Gotopoints are not restricted to a single lexical block: they are visible across the containing function (or top-level program scope) in which they are defined. Implementations may choose to expose an even broader scope (for example, process-wide), but by default gotopoints registered within a function or at top-level are available to any GOTO executed within the same function or top-level code. This change enables cross-block jumps while preserving a clear containment model: a GOTO cannot target a gotopoint defined in an unrelated function or module unless the implementation explicitly exposes that mapping.
+The statement form `GOTO(n)` evaluates `n` at runtime and transfers execution to the previously-registered gotopoint whose identifier equals `n`, matching both type and value. If no gotopoint with that identifier has been registered in a scope visible to the jump target, the interpreter raises a runtime error. `GOTO` may jump forward or backward relative to the target gotopoint; jumping to an unregistered identifier is an error. Gotopoints are not restricted to a single lexical block: they are visible across the containing function (or top-level program scope) in which they are defined. Implementations may choose to expose an even broader scope (for example, process-wide), but by default gotopoints registered within a function or at top-level are available to any `GOTO` executed within the same function or top-level code. This change enables cross-block jumps while preserving a clear containment model: a `GOTO` cannot target a gotopoint defined in an unrelated function or module unless the implementation explicitly exposes that mapping.
 
-GOTO and GOTOPOINT are intended to be low-level primitives and their use can make programs harder to reason about. They are serialized in the stat log like other statements so that execution is fully replayable for debugging and tracing.
+`GOTO` and `GOTOPOINT` are intended to be low-level primitives and their use can make programs harder to reason about. They are serialized in the stat log like other statements so that execution is fully replayable for debugging and tracing.
 - Trigger: a traceback is produced when a runtime error occurs that prevents normal forward execution (e.g., an assertion failure, divide by zero, undefined variable reference, executing `RETURN` outside of a function, or any other interpreter-defined runtime error).
 - Content: the traceback must list frames in chronological call order from the outermost (earliest) frame to the innermost (where the error occurred), and for each frame include: function name (or `<top-level>` for global code), precise source location, a short excerpt of the offending statement, and identifiers linking to the corresponding states in the state log.
 - State linkage: every frame must reference at least one serialized state snapshot from the state log that corresponds to the machine configuration immediately before the failing rewrite step for that frame. The innermost frame must also reference the rewrite (transition) record that produced the error (that is, the failing step).
@@ -163,10 +173,10 @@ To make tracebacks precise and implementable, the state log (and the machine sta
 
 The following format is recommended for the concise textual traceback:
 
-Traceback (most recent call last):
+<code>Traceback (most recent call last):
   File "<file>", line <line>, in <function_or_<top-level>>
     <statement excerpt>
-    State log index: <step_index>  State id: <state_id>
+    State log index: <step_index>  State id: <state_id></code>
 
 The final (innermost) frame is then followed by a short error message that includes the failing rewrite (for example: `DivisionByZero`), the rewrite rule name and the `step_index` at which it failed. In verbose mode, each frame block is followed by a labelled `State snapshot: and a `State transformation: section that contain the serialized `env_snapshot` and the `rewrite_record` (including `from_state_id` and `to_state_id`) so that the failure can be reproduced by replaying the states and the associated inputs.
 
@@ -191,14 +201,14 @@ The trace must clearly identify the point of origin (the expression or statement
 
 ### 9.8 Example (concise textual traceback)
 
-Traceback (most recent call last):
+<code>Traceback (most recent call last):
   File "prog.asmln", line 21, in <top-level>
     result = compute(foo, bar)
     State log index: 121  State id: s_0121
   File "lib.asmln", line 88, in compute
     x = DIV(a, b)
     State log index: 123  State id: s_0123
-DivisionByZero: attempted to DIV by zero at step_index=123 (rewrite: DIV)
+DivisionByZero: attempted to DIV by zero at step_index=123 (rewrite: DIV)</code>
 
 This example shows the outer call at the program top-level and the innermost failing call in `compute`. A verbose report would additionally print the `env_snapshot` for `compute` showing `a: 17, b: 0` and the full `rewrite_record` describing the DIV operation that failed.
 
@@ -300,6 +310,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `OR(ANY: a1, ..., ANY: aN):INT` ; Boolean OR
 - `XOR(ANY: a1, ..., ANY: aN):INT` ; Boolean XOR
 - `NOT(ANY: a):INT` ; Boolean NOT
+- `BOOL(ANY: item):INT` ; returns the truthiness of `item` as `INT` (`INT`: non-zero -> `1`, `STR`: non-empty -> `1`, `TNS`: true if any element is true), otherwise `0`
 
 ### Comparisons
 - `EQ(ANY: a, ANY: b):INT` ; 1 if a == b else 0
@@ -326,7 +337,11 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `MADD/MSUB/MMUL/MDIV(TNS: x, TNS: y):TNS` — Elementwise addition, subtraction, multiplication, and integer division. Shapes must match; all elements must be `INT`. `MDIV` raises on division by zero.
 - `MSUM(TNS: t1, ..., TNS: tN):TNS` — Elementwise sum across tensors. Shapes must match; elements must be `INT`.
 - `MPROD(TNS: t1, ..., TNS: tN):TNS` — Elementwise product across tensors. Shapes must match; elements must be `INT`.
-- `TADD/TSUB/TMUL/TDIV/TPOW(TNS: x, INT: y):TNS` — Elementwise `INT`-scalar add, subtract, multiply, divide, and exponentiate. Division by zero and negative exponents are errors (matching `DIV`/`POW` semantics).
+- `TADD(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar addition
+- `TSUB(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar subtraction
+- `TMUL(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar multiplication
+- `TDIV(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar integer division. Division by zero is an error.
+- `TPOW(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar exponentiation. Negative exponents are an error.
 
 ### Logarithms
 - `LOG(INT: a):INT` ; floor(log2(a)) for a > 0
