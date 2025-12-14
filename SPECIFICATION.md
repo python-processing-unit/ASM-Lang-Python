@@ -17,7 +17,7 @@ Whitespace consists of the space character (`U+0020`), horizontal tab, carriage 
 
 A comment begins with the `#` character and continues to the end of the current line. Comments have no effect on execution.
 
-The program text is divided into several token kinds: binary integer literals (Section 3.1); string literals delimited by double or single quotation marks ("\"", "'", Section 3.2); identifiers for variable names and user-defined function names (Section 2.5); keywords and built-ins (control-flow keywords, built-in operators and functions; see Sections 4 and 5); and delimiters, namely `(`, `)`, `{`, `}`, `[`, `]`, `,`, `:`, and `=`.
+The program text is divided into several token kinds: binary integer literals (Section 3.1); string literals delimited by double or single quotation marks ("\"", "'", Section 3.2); identifiers for variable names and user-defined function names (Section 2.5); keywords and built-ins (control-flow keywords, built-in operators and functions; see Sections 5 and 13); and delimiters, namely `(`, `)`, `{`, `}`, `[`, `]`, `,`, `:`, and `=`.
 
 Keywords: The language's reserved keywords (for example, `IF`, `WHILE`, `FUNC`, etc.) are matched by the lexer exactly as listed in this specification and are case-sensitive. Programs must use the keywords in their canonical uppercase form; otherwise the token will be recognized as an identifier. Built-in operator names such as `INPUT`, `PRINT`, and `IMPORT` follow the same case-sensitive matching rules.
 
@@ -25,7 +25,7 @@ Line continuation: The character `^` serves as a line-continuation marker. When 
 
 The character `-` is not an operator token. It is permitted only as the leading sign of a binary integer literal (Section 3.1). If `-` appears anywhere else, the lexer must raise a syntax error. When `-` starts a literal, any spaces, horizontal tabs, or carriage returns between the `-` and the first digit are ignored and the literal is treated as negative.
 
-Identifiers denote variables and user-defined functions. They must be non-empty and case-sensitive. An identifier must not contain non-ASCII characters, nor any of the following characters: `{`, `}`, `[`, `]`, `(`, `)`, `=`, `,`, `#`. The first character of an identifier must not be the digit `0` or `1` (these digits are used to begin binary integer literals). However, the characters `0` and `1` are permitted in subsequent positions within an identifier (for example, `a01` and `X10Y` are valid identifiers, while `0foo` and `1bar` are not). The namespace is flat: variables and functions share a single identifier space, so a given name cannot simultaneously denote both. A user-defined function name must not conflict with the name of any built-in operator or function (see Section 4.1).
+Identifiers denote variables and user-defined functions. They must be non-empty and case-sensitive. An identifier must not contain non-ASCII characters, nor any of the following characters: `{`, `}`, `[`, `]`, `(`, `)`, `=`, `,`, `#`. The first character of an identifier must not be the digit `0` or `1` (these digits are used to begin binary integer literals). However, the characters `0` and `1` are permitted in subsequent positions within an identifier (for example, `a01` and `X10Y` are valid identifiers, while `0foo` and `1bar` are not). The namespace is flat: variables and functions share a single identifier space, so a given name cannot simultaneously denote both. A user-defined function name must not conflict with the name of any built-in operator or function (see Section 13).
 
 Identifier character set (clarification): The (non-empty) sequence of characters that forms an identifier is determined by the following rules, which match the reference lexer implementation:
 
@@ -72,43 +72,7 @@ All other tensor operations are non-mutating: tensor literals and tensor-valued 
 
 Every runtime value has a static type: `INT`, `STR`, or `TNS`. Integers are conceptually unbounded mathematical integers. Strings are byte strings of ASCII characters. Tensors are non-scalar aggregates whose elements may be `INT`, `STR`, or `TNS`. When a Boolean interpretation is required, `INT` treats 0 as false and non-zero as true; `STR` treats the empty string as false and any non-empty string as true; `TNS` is true if any contained element is true by these rules, otherwise false. Control-flow conditions (`IF`, `ELSIF`, `WHILE`) and `ASSERT` convert strings to integers using the same rules as the `INT` built-in; tensors are first reduced to their Boolean truth value (1 or 0).
 
-
-## 4. Expressions and Operators
-
-All operators and functions, both built-in and user-defined, share a uniform function-call style syntax of the form `NAME(arg1, arg2, ..., argN)`. The argument list may be empty for certain functions such as `INPUT`. Arguments are separated by commas, and spaces may appear around commas and inside parentheses without changing meaning. Each operator has either a fixed or a variable arity.
-
-Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number of indices must equal the tensor's dimension count. Indices are one-based; 0 is invalid. Negative indices address from the end of the dimension (for example, -1 is the last element). Attempting to index with an out-of-range position raises a runtime error.
-
-`IMPORT(name)` loads another source file and provides it as a distinct module namespace. The argument must be an identifier naming a module; the interpreter first looks for a file named `<name>.asmln` in the same directory as the referring source file. When the referring source is provided via the `-source` string literal mode, the primary search directory is the process's current working directory. If the module file is not found there, the interpreter will additionally attempt to load the file from a `lib` subdirectory located alongside the interpreter implementation (that is, `<interpreter_dir>/lib/<name>.asmln`, where `<interpreter_dir>` is the directory containing the interpreter script or executable).
-
-The imported file is parsed and executed in its own isolated top-level environment on the first import during a given interpreter invocation: top-level assignments and function definitions in the imported module do not directly mutate the caller's environment during execution. During that execution unqualified identifiers (for example, `x` or `helper`) refer to names in the module's own top-level namespace. Qualified identifiers (for example, `other.FOO`) refer only to the dotted names that the module itself has created or imported; those qualified bindings are scoped to the module's namespace.
-
-After the module finishes executing the first time, the interpreter caches the module's top-level environment and the module-qualified function objects. Subsequent `IMPORT` calls for the same module identifier within the same interpreter process reuse that cached namespace/instance and do not re-execute the module source. Callers importing the same module later will observe the same shared module environment (that is, the same binding objects and the same function objects) exposed under the dotted names (`module.FOO`, `module.bar`, etc.). If the module imported other modules during its execution, those nested qualified bindings are preserved in the cached namespace and remain accessible via the same dotted paths (for example, `module.other.SYM`).
-
-This caching behavior ensures that importing a module multiple times produces the same shared namespace instance for all importers. The interpreter does not automatically perform cycle detection beyond using the cached instance once execution has completed; careful module design should avoid import cycles where possible.
-
-`ARGV()` returns the interpreter's argument vector as a one-dimensional `TNS` of `STR`. The tensor's elements are the command-line argument strings supplied to the process, in the same order as the process `argv`, with index 1 holding the interpreter's invocation entry (TNS indices are 1-based). This lets programs inspect their launch arguments from within ASM-Lang.
-
-`ASSERT(a)` checks that its argument is true in the Boolean sense. If `a` is non-zero, execution proceeds normally; if `a` is `0`, the program crashes with an assertion failure.
-
-`BYTES(n)` converts a non-negative integer into its big-endian byte representation. The result is a one-dimensional `TNS` whose elements are `INT` values in the range `0..11111111` (0-255 decimal), ordered most-significant byte first. The tensor length is `max(1, ceil(bit_length(n)/8))`; `BYTES(0)` returns a single zero byte. Supplying a negative integer is a runtime error.
-
-`SPLIT(string, delimiter = " ")` splits `string` on the exact substring `delimiter` and returns the parts as a one-dimensional `TNS` of `STR`. The delimiter defaults to a single space. The delimiter must be non-empty; otherwise a runtime error is raised. Consecutive delimiters and trailing delimiters are preserved, so empty-string elements may appear in the result. The tensor length equals the number of resulting segments.
-
-`STRIP(string, remove)` returns a `STR` formed by removing every occurrence of the substring `remove` from `string`. The `remove` argument must be a non-empty string; supplying an empty `remove` raises a runtime error. `STRIP` does not mutate its inputs and always returns a new `STR` value.
-
-`REPLACE(string, a, b)` returns a `STR` formed by replacing every occurrence of the substring `a` in `string` with `b`. The `a` argument must be a non-empty string; supplying an empty `a` raises a runtime error. `REPLACE` does not mutate its inputs and always returns a new `STR` value.
-
-`MAIN()` returns `1` when the call site belongs to the primary program file (the file passed as the interpreter's first argument, or `<string>` when `-source` is used). It returns `0` when executed from code that came from an `IMPORT` (including nested imports). The result is determined solely by the source file that contains the call expression, not by the caller's call stack.
-
-Program termination is exposed via `EXIT`. `EXIT()` or `EXIT(code)` requests immediate termination of the interpreter. If an integer `code` is supplied, it is used as the interpreter's process exit code; otherwise `0` is used. Execution stops immediately when `EXIT` is executed (no further statements run), and an entry is recorded in the state log to make deterministic replay possible. Using `EXIT` inside a function terminates the entire program (not just the function).
-
-Memory-management and function-return behavior are also exposed via operators. `DEL(x)` deletes the variable `x` from the current environment, freeing its memory; any subsequent reference to `x` is an error unless `x` is re-assigned. `RETURN(a)`, when executed inside a function body, immediately terminates that function and returns the value of `a` to the caller. Executing `RETURN` outside of a function is a runtime error.
-
-`POP(x)` is a convenience operator combining `RETURN` and `DEL`: when executed inside a function body it retrieves the current value of the identifier `x`, deletes the binding `x` from the environment (so subsequent references are an error), and returns the retrieved value to the caller. Using `POP` outside of a function is a runtime error. If `x` is frozen or undefined, `POP(x)` raises the same runtime errors as `DEL(x)` or a reference to `x` would.
-
-
-## 5. Statements and Control Flow
+## 4. Statements and Control Flow
 
 A program consists of zero or more statements separated by newlines. Each top-level expression or assignment must appear on its own line. The basic statement forms are assignments of the form `identifier = expression`, expression statements such as calls to `PRINT` whose result is ignored, control-flow constructs (`IF`, `ELSIF`, `ELSE`, `WHILE`, and `FOR`), and function definitions (`FUNC` declarations; see Section 6).
 
@@ -131,7 +95,7 @@ BREAK statement: The language provides a statement form `BREAK(n)` that terminat
 CONTINUE statement: The language provides a statement form `CONTINUE()` that, when executed inside a loop body (either a `WHILE` or `FOR` loop), immediately proceeds to the next iteration of the innermost enclosing loop, skipping any remaining statements in the current iteration. If the current iteration is the final one (that is, no further iterations would occur), `CONTINUE()` has the same effect as executing `BREAK(1)` and thus exits the innermost loop. Using `CONTINUE()` outside of any loop context is a runtime error. Implementations should record the use of `CONTINUE` in the state log so that replay and tracebacks remain deterministic.
 
 
-## 6. Functions
+## 5. Functions
 
 Functions are defined using the `FUNC` keyword with explicit parameter and return types. The canonical positional-only form is `FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R{ block }`, where each `Tk` and `R` is `INT`, `STR`, or `TNS`. Parameters may also declare a call-time default value using `Tk:arg=expr`. A parameter without a default is positional; a parameter with a default is keyword-capable. Positional parameters must appear before any parameters with defaults. Defining a function binds `name` to a callable body with the specified typed formal parameters. Function names must not conflict with the names of built-in operators or functions.
 
@@ -141,14 +105,14 @@ A user-defined function is called with the same syntax as a built-in: `name(expr
 Built-in operators and functions can be viewed as pre-defined functions provided by the runtime environment. User-defined functions share the same call syntax and are distinguished only by their names and bodies. Because of the shared namespace, a user-defined function is not permitted to use any name already reserved for a built-in. Attempting to violate this will raise an exception.
 
 
-## 7. Variables and Memory Model
+## 6. Variables and Memory Model
 
 A variable is created only when it is first assigned with an explicit type annotation of the form `TYPE : name = expression`, where TYPE is `INT`, `STR`, or `TNS`. For example: `INT` : counter = 0` or `STR` : message = "hi"`. Subsequent assignments to the same name must match the declared type and may omit the type annotation (`counter = ADD(counter,1)`). Assigning to an undeclared name without a type annotation is a runtime error. A variable exists until `DEL(name)` is executed. Referencing a variable that has never been declared, or that has been deleted, is a runtime error.
 
 The language assumes at least a global typed environment mapping identifiers to (type, value) pairs. Function calls create new environments for parameters and local variables, as described in Section 6.2; the precise details of name resolution depend on the chosen scoping rules.
 
 
-## 8. Execution Model and Semantics
+## 7. Execution Model and Semantics
 
 The interpreter compiles the source program into an initial machine state, called the seed configuration. This configuration contains at least the parsed (and possibly transformed) program representation, the initial variable environments such as an empty global environment, and an explicit model of I/O and nondeterministic inputs, initially empty.
 
@@ -157,7 +121,7 @@ Execution is driven by a single, fixed, program-independent small-step state-tra
 Every state produced during execution is serializable and human-readable. The interpreter maintains a disassembler and log that record the sequence of states visited, the program locations and conditions involved in each control-flow decision, and all I/O actions with their corresponding values. Because I/O and nondeterminism are modeled explicitly within the state, the execution of any program can be deterministically replayed from its seed configuration together with the recorded inputs.
 
 
-## 9. Standard Library
+## 8. Standard Library
 
 The standard library is a group of modules for common use cases distributed with the interpreter.
 It includes modules for:
@@ -167,11 +131,11 @@ It includes modules for:
 - PRNG: Fast (LCG) pseudorandom number generation with seed management.
 - Waveforms: Waveforms generator functions.
 
-## 10. Tracebacks and Error Reporting
+## 9. Tracebacks and Error Reporting
 
 When a runtime error or exception occurs the interpreter must produce a deterministic, human-readable traceback derived from the state log. The traceback exposes the call stack (frames) at the point of failure and associates each frame with both (1) a compact source-location description and (2) the relevant serialized state sections and state-transformation records from the state log. The goal is to provide developers with the same immediate debugging information that Python's traceback provides but with the additional ability to inspect the exact machine states and the rewrite steps that led to the error for deterministic replay.
 
-### 10.1 Traceback semantics (high level)
+### 9.1 Traceback semantics (high level)
 
 
 GOTOPOINT and GOTO: Two additional control-flow primitives allow program execution to jump to a dynamically-registered program location. The statement form `GOTOPOINT(n)` evaluates the expression `n` and registers a gotopoint with that identifier at the point where the statement executes. Registration occurs at runtime when the `GOTOPOINT` statement executes; subsequent execution (including execution within loops or after imports) may depend on whether the gotopoint has been registered. Identifiers may be `INT` or `STR`; negative `INT` identifiers are invalid.
@@ -184,7 +148,7 @@ GOTO and GOTOPOINT are intended to be low-level primitives and their use can mak
 - State linkage: every frame must reference at least one serialized state snapshot from the state log that corresponds to the machine configuration immediately before the failing rewrite step for that frame. The innermost frame must also reference the rewrite (transition) record that produced the error (that is, the failing step).
 - Presentation modes: the interpreter must support a concise textual traceback (default) and a verbose mode. The concise mode shows the usual file/line/function stack with a one-line code excerpt per frame and the state-log index. The verbose mode prints, for each frame, the selected state sections (for example: local environment, selected global variables, and the expression evaluation stack) and the full state-transformation record (from_state -> to_state, the rewrite rule name and arguments). The verbose mode is intended for interactive debugging and post-mortem inspection.
 
-### 10.2 Required fields and invariants in the state log
+### 9.2 Required fields and invariants in the state log
 
 To make tracebacks precise and implementable, the state log (and the machine state representation) must include the following information at every step when relevant:
 
@@ -195,7 +159,7 @@ To make tracebacks precise and implementable, the state log (and the machine sta
 - `env_snapshot` (selectable): a serialized partial view of the state containing bindings for the local variables of the active frame and, where reasonable, a subset of global variables. The interpreter may elide large or sensitive values by policy, but must provide a clear indication when values are elided.
 - `rewrite_record`: for each step that performs a state transition, the log must include a record describing the rewrite rule (name, inputs, and parameters), and the `from_state_id` and `to_state_id` pairs.
 
-### 10.3 Traceback textual format (recommended)
+### 9.3 Traceback textual format (recommended)
 
 The following format is recommended for the concise textual traceback:
 
@@ -206,26 +170,26 @@ Traceback (most recent call last):
 
 The final (innermost) frame is then followed by a short error message that includes the failing rewrite (for example: `DivisionByZero`), the rewrite rule name and the `step_index` at which it failed. In verbose mode, each frame block is followed by a labelled `State snapshot: and a `State transformation: section that contain the serialized `env_snapshot` and the `rewrite_record` (including `from_state_id` and `to_state_id`) so that the failure can be reproduced by replaying the states and the associated inputs.
 
-### 10.4 Machine-readable traceback (JSON)
+### 9.4 Machine-readable traceback (JSON)
 
 The interpreter must also be able to emit a machine-readable traceback structure suitable for diagnostics tools and editors. The only requirement is that a consumer of the state log can identify which state and which rewrite step correspond to each frame.
 
-### 10.5 Point of origin in source code
+### 9.5 Point of origin in source code
 
 The trace must clearly identify the point of origin (the expression or statement that directly caused the error) by including the `source_location` and the `step_index` of the failing rewrite. Implementations should also include the exact token or sub-expression when available (for example, the `DIV(a,0)` call that produced the division-by-zero), and the surrounding source excerpt (at least one line above and below, if available) to make diagnosis easier.
 
-### 10.6 Integrating tracebacks with the disassembler and replay
+### 9.6 Integrating tracebacks with the disassembler and replay
 
 - The disassembler view must support jumping from a printed traceback to the corresponding state-log entry (`step_index`) and to the reconstructed source location so that a user can inspect the full `from_state` and `to_state` pair and step through the rewrite that produced the error.
 - Because the state log records I/O and nondeterminism explicitly, the disassembler/replayer must be able to replay the exact failing step when given the seed configuration and the recorded inputs.
 
-### 10.7 Implementation notes for builders
+### 9.7 Implementation notes for builders
 
 - The instrumentation needed for tracebacks is primarily bookkeeping: ensure the state log records `step_index`, `state_id`, `frame_id`, and optional `source_location` for each step when appropriate.
 - When collecting `env_snapshot` data, prefer including only the local environment of the active frame and a small set of globals to keep tracebacks readable; provide a `--verbose` or similar flag to emit full snapshots.
 - Security note: because state snapshots may contain sensitive data, implementations should provide a configurable policy to redact or obfuscate values when generating tracebacks for untrusted logs.
 
-### 10.8 Example (concise textual traceback)
+### 9.8 Example (concise textual traceback)
 
 Traceback (most recent call last):
   File "prog.asmln", line 21, in <top-level>
@@ -238,7 +202,7 @@ DivisionByZero: attempted to DIV by zero at step_index=123 (rewrite: DIV)
 
 This example shows the outer call at the program top-level and the innermost failing call in `compute`. A verbose report would additionally print the `env_snapshot` for `compute` showing `a: 17, b: 0` and the full `rewrite_record` describing the DIV operation that failed.
 
-## 11. Interpreter Use
+## 10. Interpreter Use
 
 This section documents how the reference interpreter accepts program input and how to enable verbose tracebacks that include environment snapshots.
 
@@ -255,7 +219,7 @@ Example invocations (illustrative):
 
 - REPL / Interactive mode: `asm-lang` (no program argument)
 
-## REPL (Interactive Mode)
+## 11. REPL (Interactive Mode)
 
 When the interpreter is invoked without a program path or a `-source` string argument it enters an interactive read–eval–print loop (REPL). The REPL is a convenient development and exploration environment that executes ASM-Lang statements using the same parser, runtime, built-ins, and state-logging semantics as file-mode execution. The following rules describe REPL behaviour:
 
@@ -272,11 +236,17 @@ Notes and examples:
 - Exit programmatically: `EXIT()` — this immediately terminates the interpreter and returns the specified exit code to the shell, just like in batch execution.
 
 
-## Operators, Functions, and Statements
+## 12. Operators, Functions, and Statements
 
 This section lists built-in functions, operators and statement signatures, along with a (somewhat) brief description of their behaviour.
 
 Type notation: union signatures such as `INT|STR` restrict arguments to the listed types. `ANY` now means `INT`, `STR`, or `TNS` unless explicitly narrowed below.
+
+### Expression syntax
+
+All operators and functions, both built-in and user-defined, share a uniform function-call style syntax of the form `NAME(arg1, arg2, ..., argN)`. The argument list may be empty for certain functions such as `INPUT`. Arguments are separated by commas, and spaces may appear around commas and inside parentheses without changing meaning. Each operator has either a fixed or a variable arity.
+
+Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number of indices must equal the tensor's dimension count. Indices are one-based; 0 is invalid. Negative indices address from the end of the dimension (for example, -1 is the last element). Attempting to index with an out-of-range position raises a runtime error.
 
 ### Function / Operator Signatures (expression position)
 - `INPUT():STR` or `INPUT(STR: s):STR` ; returns a `STR` from the input stream; use `INT` to coerce to an integer when needed. The interpreter prints the prompt inline (so a REPL or other output sink can display it) before reading a line of input. The I/O event is recorded for replay and, when a prompt was supplied, the recorded event includes the prompt text.
@@ -284,12 +254,16 @@ Type notation: union signatures such as `INT|STR` restrict arguments to the list
 - `RUN(STR: s)` ; Run a string as an ASM-Lang program within the current environment;
 - `UPPER(STR: s):STR` ; `STR` -> uppercase `STR`; error if `s` is `INT`
 - `LOWER(STR: s):STR` ; `STR` -> lowercase `STR`; error if `s` is `INT`
+- `SPLIT(STR: string, STR: delimiter = " "):TNS` — Splits `string` on the exact substring `delimiter` and returns the parts as a one-dimensional `TNS` of `STR`. The delimiter defaults to a single space. The delimiter must be non-empty; otherwise a runtime error is raised. Consecutive delimiters and trailing delimiters are preserved, so empty-string elements may appear in the result.
+- `STRIP(STR: string, STR: remove):STR` — Returns a `STR` formed by removing every occurrence of the substring `remove` from `string`. The `remove` argument must be a non-empty string; supplying an empty `remove` raises a runtime error.
+- `REPLACE(STR: string, STR: a, STR: b):STR` — Returns a `STR` formed by replacing every occurrence of the substring `a` in `string` with `b`. The `a` argument must be a non-empty string; supplying an empty `a` raises a runtime error.
 - `ASSERT(ANY: a)` ; crashes if `INT`-style` truthiness of `a` is 0
-- `MAIN():INT` ; 1 if executing in the primary program file, else 0 when in imported code
+- `MAIN():INT` — Returns `1` when the call site belongs to the primary program file (the file passed as the interpreter's first argument, or `<string>` when `-source` is used). Returns `0` when executed from code that came from an `IMPORT` (including nested imports). The result is determined solely by the source file that contains the call expression, not by the caller's call stack.
 - `DEL(SYMBOL: x)` ; delete variable `x` from environment
-- `EXIT()` or `EXIT(INT:code)` ; terminate program immediately with optional exit code (default 0)
+- `EXIT()` or `EXIT(INT:code)` — Requests immediate termination of the interpreter. If an integer `code` is supplied, it is used as the interpreter's process exit code; otherwise `0` is used. Execution stops immediately when `EXIT` is executed (no further statements run), and an entry is recorded in the state log to make deterministic replay possible. Using `EXIT` inside a function terminates the entire program (not just the function).
 - `INT(STR: x):INT` ; `STR` -> `INT` using empty/01/other rules; `INT` passthrough
 - `STR(INT: x):STR` ; `INT` -> binary-spelled `STR`; `STR` passthrough
+- `BYTES(INT: n):TNS` — Converts a non-negative integer into its big-endian byte representation. The result is a one-dimensional `TNS` whose elements are `INT` values in the range `0..11111111` (0-255 decimal), ordered most-significant byte first. The tensor length is `max(1, ceil(bit_length(n)/8))`; `BYTES(0)` returns a single zero byte. Supplying a negative integer is a runtime error.
 - Binary literal: optional leading `-` (spaces/tabs/CR allowed after the dash) then `{0,1}+`
 - String literal: `"` characters `"` (no escapes, no newlines)
 - `EXIST(SYMBOL: x):INT` ; returns `1` if the identifier `x` exists in the current environment (searching enclosing environments), else `0`. The argument must be an identifier; supplying an expression that is not a plain identifier is a runtime error.
@@ -359,7 +333,15 @@ Type notation: union signatures such as `INT|STR` restrict arguments to the list
 - `CLOG(INT: a):INT` ; ceil(log2(a)) for a > 0
 
 ### Module operations:
-- `IMPORT(MODULE: name)` ; load and execute `<name>.asmln` as a module.
+- `IMPORT(MODULE: name)` — Loads another source file and provides it as a distinct module namespace.
+
+  The argument must be an identifier naming a module; the interpreter first looks for a file named `<name>.asmln` in the same directory as the referring source file. When the referring source is provided via the `-source` string literal mode, the primary search directory is the process's current working directory. If the module file is not found there, the interpreter will additionally attempt to load the file from a `lib` subdirectory located alongside the interpreter implementation (that is, `<interpreter_dir>/lib/<name>.asmln`, where `<interpreter_dir>` is the directory containing the interpreter script or executable).
+
+  The imported file is parsed and executed in its own isolated top-level environment on the first import during a given interpreter invocation: top-level assignments and function definitions in the imported module do not directly mutate the caller's environment during execution. During that execution unqualified identifiers (for example, `x` or `helper`) refer to names in the module's own top-level namespace. Qualified identifiers (for example, `other.FOO`) refer only to the dotted names that the module itself has created or imported; those qualified bindings are scoped to the module's namespace.
+
+  After the module finishes executing the first time, the interpreter caches the module's top-level environment and the module-qualified function objects. Subsequent `IMPORT` calls for the same module identifier within the same interpreter process reuse that cached namespace/instance and do not re-execute the module source. Callers importing the same module later will observe the same shared module environment (that is, the same binding objects and the same function objects) exposed under the dotted names (`module.FOO`, `module.bar`, etc.). If the module imported other modules during its execution, those nested qualified bindings are preserved in the cached namespace and remain accessible via the same dotted paths (for example, `module.other.SYM`).
+
+  This caching behavior ensures that importing a module multiple times produces the same shared module namespace instance for all importers. The interpreter does not automatically perform cycle detection beyond using the cached instance once execution has completed; careful module design should avoid import cycles where possible.
 - `EXPORT(SYMBOL: symbol, MODULE: module):INT` — Adds the caller's binding for the identifier `symbol` into the namespace of the imported module named by the identifier `module`. The first argument must be an identifier (not a string literal); its current value in the caller's environment is copied into the imported module's namespace and becomes available as the qualified name `module.symbol` in the caller's environment. The second argument must be an identifier naming a previously-imported module; if the module has not been imported yet, the interpreter raises a runtime error (rewrite: EXPORT). `EXPORT` returns `INT` 0 on success.
 
 ### File operations:
@@ -381,6 +363,7 @@ Type notation: union signatures such as `INT|STR` restrict arguments to the list
 
 ### Host and environment information:
 - `OS():STR` — Returns a short, lowercase ASCII string identifying the host operating-system family. Typical values include `win` for Windows, `linux` for Linux, `macos` for macOS, and `unix` for other Unix-like platforms. The call takes no arguments and returns a `STR`.
+- `ARGV():TNS` — Returns the interpreter's argument vector as a one-dimensional `TNS` of `STR`. The tensor's elements are the command-line argument strings supplied to the process, in the same order as the process `argv`, with index 1 holding the interpreter's invocation entry (TNS indices are 1-based).
 
 ### Control / Function / Statement Signatures (statement position)
 - Assignment: `TYPE : identifier = expression` on first use; subsequent assignments omit TYPE but must match the original type. TYPE is `INT`, `STR`, or `TNS`. Tensor elements may be reassigned with `identifier[i1,...,iN] = expression` (indices are 1-based with negative-index support, and the stored type at that element must not change).
@@ -390,6 +373,7 @@ Type notation: union signatures such as `INT|STR` restrict arguments to the list
 - `FOR(counter, INT: target){ block }` ; `counter` initialized to 0, loop until counter >= target
 `FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R{ block }` ; typed function definition with return type R (`INT`, `STR`, or `TNS`); optional defaults use `Tk:arg=expr` and must appear only after all positional parameters. Functions with return type `TNS` must explicitly execute `RETURN(value)`; there is no implicit default tensor value.
 - `RETURN(ANY: a)` ; return from function with value `a`
+- `POP(SYMBOL: x)` — Convenience statement combining `RETURN` and `DEL`: when executed inside a function body it retrieves the current value of the identifier `x`, deletes the binding `x` from the environment (so subsequent references are an error), and returns the retrieved value to the caller. Using `POP` outside of a function is a runtime error.
 - `BREAK(INT: n)` ; break out of the innermost `n` enclosing loops; raises a runtime error if `n` ≤ 0 or if `n` is greater than the current loop nesting depth
 - `CONTINUE()` ; skip remaining statements in the innermost loop iteration and proceed to the next iteration; if used in the last iteration it acts like `BREAK(1)`. Using `CONTINUE()` outside of a loop is a runtime error.
 - `GOTOPOINT(n)` ; register a gotopoint with identifier `n` at this statement's location (identifier may be `INT` or `STR`) (n evaluated at runtime). Gotopoints are visible across the containing function or top-level scope rather than being restricted to a single lexical block.
