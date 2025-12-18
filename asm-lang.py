@@ -5,20 +5,21 @@ import argparse
 import sys
 from typing import List, Optional
 
+from extensions import ASMExtensionError, ReplContext, load_runtime_services
 from interpreter import ASMRuntimeError, Environment, ExitSignal, Interpreter, TracebackFormatter
 from lexer import ASMParseError, Lexer
 from parser import Parser, Statement
 
 
-def _parse_statements_from_source(text: str, filename: str) -> List[Statement]:
+def _parse_statements_from_source(text: str, filename: str, *, type_names: Optional[set[str]] = None) -> List[Statement]:
     lexer = Lexer(text, filename)
     tokens = lexer.tokenize()
-    parser = Parser(tokens, filename, text.splitlines())
+    parser = Parser(tokens, filename, text.splitlines(), type_names=type_names)
     program = parser.parse()
     return program.statements
 
 
-def run_repl(verbose: bool) -> int:
+def run_repl(*, verbose: bool, services) -> int:
     print("\x1b[38;2;153;221;255mASM-Lang\033[0m REPL. Enter statements, blank line to run buffer.") # "ASM-Lang" in light blue
     # Use "<string>" as the REPL's effective source filename so that MAIN() and imports behave
     had_output = False
@@ -27,7 +28,35 @@ def run_repl(verbose: bool) -> int:
         had_output = True
         print(text, end="")
 
-    interpreter = Interpreter(source="", filename="<string>", verbose=verbose, input_provider=(lambda: input()), output_sink=_output_sink)
+    picked = services.hook_registry.pick_repl() if services is not None else None
+    if picked is not None:
+        _name, runner, _ext = picked
+        ctx = ReplContext(
+            verbose=verbose,
+            services=services,
+            make_interpreter=lambda source, filename: Interpreter(
+                source=source,
+                filename=filename,
+                verbose=verbose,
+                services=services,
+                input_provider=(lambda: input()),
+                output_sink=_output_sink,
+            ),
+        )
+        return runner(ctx)
+
+    try:
+        interpreter = Interpreter(
+            source="",
+            filename="<string>",
+            verbose=verbose,
+            services=services,
+            input_provider=(lambda: input()),
+            output_sink=_output_sink,
+        )
+    except ASMExtensionError as exc:
+        print(f"ExtensionError: {exc}", file=sys.stderr)
+        return 1
     global_env = Environment()
     # Make the REPL top-level frame mimic script top-level frame
     global_frame = interpreter._new_frame("<top-level>", global_env, None)
@@ -58,7 +87,7 @@ def run_repl(verbose: bool) -> int:
 
         if not buffer and stripped != "" and not is_block_start:
             try:
-                statements = _parse_statements_from_source(line, "<string>")
+                statements = _parse_statements_from_source(line, "<string>", type_names=interpreter.type_registry.names())
                 try:
                     interpreter._execute_block(statements, global_env)
                 except ExitSignal as sig:
@@ -72,7 +101,7 @@ def run_repl(verbose: bool) -> int:
             source_text = "\n".join(buffer)
             buffer.clear()
             try:
-                statements = _parse_statements_from_source(source_text, "<string>")
+                statements = _parse_statements_from_source(source_text, "<string>", type_names=interpreter.type_registry.names())
                 interpreter._execute_block(statements, global_env)
             except ExitSignal as sig:
                 return sig.code
@@ -92,23 +121,48 @@ def run_repl(verbose: bool) -> int:
 
 def run_cli(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="ASM-Lang reference interpreter")
-    parser.add_argument("program", nargs="?", help="Source file path or literal source with -source")
+    parser.add_argument("inputs", nargs="*", help="Program path/source and/or extension files (.py/.asmx)")
+    parser.add_argument("--ext", action="append", default=[], help="Extension path (.py) or pointer file (.asmx)")
     parser.add_argument("-source", "--source", dest="source_mode", action="store_true", help="Treat program argument as literal source text")
     parser.add_argument("-verbose", "--verbose", dest="verbose", action="store_true", help="Emit env snapshots in tracebacks")
     parser.add_argument("--traceback-json", action="store_true", help="Also emit JSON traceback")
     args = parser.parse_args(argv)
 
-    if args.program is None:
-        if args.source_mode:
+    inputs: List[str] = list(args.inputs or [])
+    ext_paths: List[str] = list(args.ext or [])
+    remaining: List[str] = []
+    for item in inputs:
+        lower = item.lower()
+        if lower.endswith(".py") or lower.endswith(".asmx"):
+            ext_paths.append(item)
+        else:
+            remaining.append(item)
+
+    try:
+        services = load_runtime_services(ext_paths) if ext_paths else load_runtime_services([])
+    except ASMExtensionError as exc:
+        print(f"ExtensionError: {exc}", file=sys.stderr)
+        return 1
+
+    program: Optional[str] = None
+    if remaining:
+        if len(remaining) > 1:
+            print("Too many non-extension inputs; expected a single program argument", file=sys.stderr)
+            return 1
+        program = remaining[0]
+
+    if program is None:
+        if args.source_mode and not ext_paths:
             print("-source requires a program string", file=sys.stderr)
             return 1
-        return run_repl(verbose=args.verbose)
+        # If only extensions are present, run REPL with the loaded extensions.
+        return run_repl(verbose=args.verbose, services=services)
 
     if args.source_mode:
-        source_text = args.program
+        source_text = program
         filename = "<string>"
     else:
-        filename = args.program
+        filename = program
         try:
             with open(filename, "r", encoding="utf-8") as handle:
                 source_text = handle.read()
@@ -116,7 +170,11 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
             print(f"Failed to read {filename}: {exc}", file=sys.stderr)
             return 1
 
-    interpreter = Interpreter(source=source_text, filename=filename, verbose=args.verbose)
+    try:
+        interpreter = Interpreter(source=source_text, filename=filename, verbose=args.verbose, services=services)
+    except ASMExtensionError as exc:
+        print(f"ExtensionError: {exc}", file=sys.stderr)
+        return 1
     try:
         interpreter.run()
     except ASMParseError as error:

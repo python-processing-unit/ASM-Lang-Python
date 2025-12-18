@@ -241,7 +241,24 @@ This example shows the outer call at the program top-level and the innermost fai
 
 This section documents how the reference interpreter accepts program input and how to enable verbose tracebacks that include environment snapshots.
 
-- Invocation arguments: the interpreter reads its first program argument (that is, `argv[1]`) as the program source. If the `-source` flag is not present, `argv[1]` is interpreted as a path to a source file and the interpreter loads and parses that file. If the `-source` flag is present, `argv[1]` is treated as the source text itself (a string containing the program) and is parsed directly without reading a file.
+- Program argument: the interpreter reads a single *program* argument as its input program. If the `-source` flag is not present, the program argument is interpreted as a path to a source file and the interpreter loads and parses that file. If the `-source` flag is present, the program argument is treated as the source text itself (a string containing the program) and is parsed directly without reading a file.
+
+- Extensions: the interpreter may also accept zero or more *extension* arguments that load Python extension modules before parsing and execution. Extensions may add new operators, new runtime types, and runtime hooks (including custom REPL implementations), but MUST NOT replace or modify existing built-in operators or types.
+  - A Python extension is a `.py` file that defines `ASM_LANG_EXTENSION_API_VERSION = 1` (optional; defaults to 1) and a callable `asm_lang_register(ext)` entrypoint.
+  - A pointer file is a `.asmx` text file containing one extension path per line. Lines are trimmed; blank lines are ignored; lines beginning with `#` are comments. Relative paths are resolved relative to the `.asmx` file's directory.
+  - If a `.asmx` file is supplied as an argument, all of the linked extensions are loaded.
+  - Extensions are loaded before parsing so that extension-defined type names are recognized in typed assignments and function signatures.
+  - If the only supplied positional inputs are extensions (and no program is supplied), the interpreter runs the REPL with the loaded extensions.
+  - Hook surfaces exposed by the reference implementation include:
+    - Operators: additional call names dispatched like built-ins.
+    - Per-N-steps rules: `every_n_steps(N, handler)` runs the handler after state-log step indices where `step_index % N == 0`.
+    - Event-bound rules: `on_event(name, handler)` for the following event names:
+      - `program_start(interpreter, program, env)`
+      - `program_end(interpreter, exit_code)`
+      - `on_error(interpreter, error)`
+      - `before_statement(interpreter, stmt, env)` / `after_statement(interpreter, stmt, env)`
+      - `before_call(interpreter, name, args, env, location)` / `after_call(interpreter, name, result, env, location)`
+    - REPL: extensions may provide a replacement REPL implementation.
 
 - Verbose tracebacks: if the `-verbose` flag is supplied on the command line, tracebacks include the environment snapshots described in Section 10.8. In concise traceback mode the `-verbose` flag causes the interpreter to attach an `env_snapshot` entry to each frame shown; in verbose traceback mode the same flag expands the printed `State snapshot: blocks to include the selected local environment and any small set of globals included by policy. The snapshot contents follow the requirements in Section 10.2 and are suitable for deterministic replay.
 
@@ -251,14 +268,16 @@ Notes:
 Example invocations (illustrative):
 - File mode: `asm-lang program.asmln`
 - Source-string mode: `asm-lang -source "foo = INPUT\nPRINT(foo)" -verbose`
+- With extensions (file mode): `asm-lang myext.py program.asmln`
+- With pointer file: `asm-lang extensions.asmx program.asmln`
 
-- REPL / Interactive mode: `asm-lang` (no program argument)
+- REPL / Interactive mode: `asm-lang` (no program argument), or `asm-lang myext.py` (extensions only)
 
 ## 11. REPL (Interactive Mode)
 
 When the interpreter is invoked without a program path or a `-source` string argument it enters an interactive read–eval–print loop (REPL). The REPL is a convenient development and exploration environment that executes ASM-Lang statements using the same parser, runtime, built-ins, and state-logging semantics as file-mode execution. The following rules describe REPL behaviour:
 
-- Invocation: running `interpreter` with no positional `program` argument launches the REPL. The `-verbose` and `--traceback-json` flags keep the same meanings in the REPL as in batch mode.
+- Invocation: running `asm-lang` with no program argument launches the REPL. If one or more extensions are supplied and no program argument is supplied, the interpreter launches a REPL with those extensions loaded; if an extension provides a replacement REPL, that REPL may be used.
 - Prompting and input: the REPL presents a primary prompt for new top-level input and a continuation prompt while the user is entering a multi-line block (for example, the body of `FUNC`, `IF`, `WHILE`, or `FOR`).
 - Single-line execution: when the user enters a single complete top-level statement (for example `x = 1010` or `PRINT(x)`), the REPL parses and executes that statement immediately and prints any side-effect output. This means `EXIT()` typed as a single-line statement will terminate the REPL immediately and return the supplied exit code (or `0` if omitted), identical to the behaviour when `EXIT()` is executed in a file.
 - Multi-line buffering: if a statement begins a block (for example a `FUNC` definition or an `IF(...){` that spans multiple lines), the REPL buffers lines until the block is complete (a blank line may be used to indicate end-of-entry when appropriate). When the buffer is complete the REPL parses and executes the collected statements as a unit.
@@ -275,7 +294,7 @@ Notes and examples:
 
 This section lists built-in functions, operators and statement signatures, along with a (somewhat) brief description of their behaviour.
 
-Type notation: union signatures such as `INT|STR` restrict arguments to the listed types. `ANY` now means `INT`, `STR`, or `TNS` unless explicitly narrowed below.
+Type notation: union signatures such as `INT|STR` restrict arguments to the listed types. `ANY` means "any runtime value"; in the base language this includes `INT`, `STR`, and `TNS`, and when extensions are enabled it also includes extension-defined types (unless a signature explicitly narrows the set).
 
 ### Expression syntax
 

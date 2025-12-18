@@ -161,10 +161,18 @@ class CallArgument:
 
 
 class Parser:
-    def __init__(self, tokens: List[Token], filename: str, source_lines: List[str]):
+    def __init__(
+        self,
+        tokens: List[Token],
+        filename: str,
+        source_lines: List[str],
+        *,
+        type_names: Optional[Iterable[str]] = None,
+    ):
         self.tokens = tokens
         self.filename = filename
         self.source_lines = source_lines
+        self.type_names = set(type_names) if type_names is not None else {"INT", "STR", "TNS"}
         self.index = 0
 
     def parse(self) -> Program:
@@ -505,13 +513,13 @@ class Parser:
 
     def _consume_type_token(self) -> Token:
         token = self._consume("IDENT")
-        if token.value not in {"INT", "STR", "TNS"}:
+        if token.value not in self.type_names:
             raise ASMParseError(f"Unknown type '{token.value}' at line {token.line}")
         return token
 
     def _is_typed_assignment_start(self) -> bool:
         current = self._peek()
-        if current.type != "IDENT" or current.value not in {"INT", "STR", "TNS"}:
+        if current.type != "IDENT" or current.value not in self.type_names:
             return False
         if self.index + 1 >= len(self.tokens):
             return False

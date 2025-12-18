@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from numpy.typing import NDArray
 
 from lexer import ASMError, ASMParseError, Lexer
+from extensions import ASMExtensionError, HookRegistry, RuntimeServices, StepContext, TypeContext, TypeRegistry, TypeSpec, build_default_services
 from parser import (
     Assignment,
     Block,
@@ -60,7 +61,7 @@ class Tensor:
 @dataclass
 class Value:
     type: str
-    value: Union[int, str, Tensor]
+    value: Any
 
 
 class ASMRuntimeError(ASMError):
@@ -181,7 +182,13 @@ class Environment:
             if val.type == TYPE_TNS and isinstance(val.value, Tensor):
                 dims = ",".join(str(d) for d in val.value.shape)
                 return f"{val.type}:[{dims}]"
-            return f"{val.type}:{val.value}"
+            try:
+                rendered = str(val.value)
+            except Exception:
+                rendered = repr(val.value)
+            if len(rendered) > 80:
+                rendered = rendered[:77] + "..."
+            return f"{val.type}:{rendered}"
 
         return {k: _render(v) for k, v in self.values.items()}
 
@@ -405,9 +412,14 @@ class Builtins:
 
         self.table[name] = BuiltinFunction(name=name, min_args=arity, max_args=arity, impl=impl)
 
-    def _register_variadic(self, name: str, min_args: int, func: Callable[[List[Value], SourceLocation], Value]) -> None:
-        def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
-            return func(args, location)
+    def _register_variadic(
+        self,
+        name: str,
+        min_args: int,
+        func: Callable[["Interpreter", List[Value], SourceLocation], Value],
+    ) -> None:
+        def impl(interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+            return func(interpreter, args, location)
 
         self.table[name] = BuiltinFunction(name=name, min_args=min_args, max_args=None, impl=impl)
 
@@ -418,6 +430,18 @@ class Builtins:
         max_args: Optional[int],
         impl: BuiltinImpl,
     ) -> None:
+        self.table[name] = BuiltinFunction(name=name, min_args=min_args, max_args=max_args, impl=impl)
+
+    def register_extension_operator(
+        self,
+        *,
+        name: str,
+        min_args: int,
+        max_args: Optional[int],
+        impl: BuiltinImpl,
+    ) -> None:
+        if name in self.table:
+            raise ASMExtensionError(f"Cannot override existing operator '{name}'")
         self.table[name] = BuiltinFunction(name=name, min_args=min_args, max_args=max_args, impl=impl)
 
     def invoke(
@@ -512,29 +536,11 @@ class Builtins:
         parts = tail.split(None, 1)
         return parts[0] if parts else None
 
-    def _as_bool_value(self, value: Value) -> int:
-        if value.type == TYPE_INT:
-            return 0 if value.value == 0 else 1
-        if value.type == TYPE_STR:
-            return 0 if value.value == "" else 1
-        if value.type == TYPE_TNS:
-            assert isinstance(value.value, Tensor)
-            return 1 if any(self._as_bool_value(item) for item in value.value.data.flat) else 0
-        return 0
+    def _as_bool_value(self, interpreter: "Interpreter", value: Value, location: SourceLocation) -> int:
+        return 1 if interpreter._condition_int(value, location) != 0 else 0
 
-    def _condition_from_value(self, value: Value) -> int:
-        if value.type == TYPE_INT:
-            return value.value  # type: ignore[return-value]
-        if value.type == TYPE_STR:
-            text = value.value  # type: ignore[assignment]
-            if text == "":
-                return 0
-            if set(text).issubset({"0", "1"}):
-                return int(text, 2)
-            return 1
-        if value.type == TYPE_TNS:
-            return self._as_bool_value(value)
-        return 0
+    def _condition_from_value(self, interpreter: "Interpreter", value: Value, location: SourceLocation) -> int:
+        return interpreter._condition_int(value, location)
 
     def _safe_div(self, a: int, b: int) -> int:
         if b == 0:
@@ -575,18 +581,18 @@ class Builtins:
         return abs(a * b) // math.gcd(a, b)
 
     # Variadic helpers
-    def _sum(self, values: List[Value], location: SourceLocation) -> Value:
+    def _sum(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         ints = [self._expect_int(v, "SUM", location) for v in values]
         return Value(TYPE_INT, sum(ints))
 
-    def _prod(self, values: List[Value], location: SourceLocation) -> Value:
+    def _prod(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         ints = [self._expect_int(v, "PROD", location) for v in values]
         result = 1
         for val in ints:
             result *= val
         return Value(TYPE_INT, result)
 
-    def _max(self, values: List[Value], location: SourceLocation) -> Value:
+    def _max(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         if not values:
             raise ASMRuntimeError("MAX requires at least one argument", rewrite_rule="MAX")
         first_type = values[0].type
@@ -601,7 +607,7 @@ class Builtins:
         longest = max(strs, key=len)
         return Value(TYPE_STR, longest)
 
-    def _min(self, values: List[Value], location: SourceLocation) -> Value:
+    def _min(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         if not values:
             raise ASMRuntimeError("MIN requires at least one argument", rewrite_rule="MIN")
         first_type = values[0].type
@@ -616,13 +622,13 @@ class Builtins:
         shortest = min(strs, key=len)
         return Value(TYPE_STR, shortest)
 
-    def _any(self, values: List[Value], _: SourceLocation) -> Value:
-        return Value(TYPE_INT, 1 if any(self._as_bool_value(v) for v in values) else 0)
+    def _any(self, interpreter: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
+        return Value(TYPE_INT, 1 if any(interpreter._condition_int(v, location) != 0 for v in values) else 0)
 
-    def _all(self, values: List[Value], _: SourceLocation) -> Value:
-        return Value(TYPE_INT, 1 if all(self._as_bool_value(v) for v in values) else 0)
+    def _all(self, interpreter: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
+        return Value(TYPE_INT, 1 if all(interpreter._condition_int(v, location) != 0 for v in values) else 0)
 
-    def _len(self, values: List[Value], _: SourceLocation) -> Value:
+    def _len(self, _: "Interpreter", values: List[Value], __: SourceLocation) -> Value:
         for v in values:
             if v.type not in (TYPE_INT, TYPE_STR):
                 raise ASMRuntimeError("LEN accepts only INT or STR arguments", rewrite_rule="LEN")
@@ -652,7 +658,7 @@ class Builtins:
         length = 1 if magnitude == 0 else magnitude.bit_length()
         return Value(TYPE_INT, length)
 
-    def _join(self, values: List[Value], location: SourceLocation) -> Value:
+    def _join(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         if not values:
             raise ASMRuntimeError("JOIN requires at least one argument", rewrite_rule="JOIN")
         first_type = values[0].type
@@ -692,34 +698,28 @@ class Builtins:
         return Value(TYPE_TNS, Tensor(shape=[len(parts)], data=data))
 
     # Boolean-like operators treating strings via emptiness
-    def _and(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+    def _and(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
         a, b = args
-        return Value(TYPE_INT, 1 if (self._as_bool_value(a) and self._as_bool_value(b)) else 0)
+        return Value(TYPE_INT, 1 if (self._as_bool_value(interpreter, a, location) and self._as_bool_value(interpreter, b, location)) else 0)
 
-    def _or(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+    def _or(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
         a, b = args
-        return Value(TYPE_INT, 1 if (self._as_bool_value(a) or self._as_bool_value(b)) else 0)
+        return Value(TYPE_INT, 1 if (self._as_bool_value(interpreter, a, location) or self._as_bool_value(interpreter, b, location)) else 0)
 
-    def _xor(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+    def _xor(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
         a, b = args
-        return Value(TYPE_INT, 1 if (self._as_bool_value(a) ^ self._as_bool_value(b)) else 0)
+        return Value(TYPE_INT, 1 if (self._as_bool_value(interpreter, a, location) ^ self._as_bool_value(interpreter, b, location)) else 0)
 
-    def _not(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
-        return Value(TYPE_INT, 1 if self._as_bool_value(args[0]) == 0 else 0)
+    def _not(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, loc: SourceLocation) -> Value:
+        return Value(TYPE_INT, 1 if self._as_bool_value(interpreter, args[0], loc) == 0 else 0)
 
-    def _bool(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, __loc: SourceLocation) -> Value:
+    def _bool(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, loc: SourceLocation) -> Value:
         # BOOL(ANY: item):INT -> truthiness of item (INT: nonzero, STR: non-empty, TNS: any true element)
-        return Value(TYPE_INT, 1 if self._as_bool_value(args[0]) != 0 else 0)
+        return Value(TYPE_INT, 1 if self._as_bool_value(interpreter, args[0], loc) != 0 else 0)
 
     def _eq(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
         a, b = args
-        if a.type != b.type:
-            return Value(TYPE_INT, 0)
-        if a.type == TYPE_TNS:
-            assert isinstance(a.value, Tensor)
-            assert isinstance(b.value, Tensor)
-            return Value(TYPE_INT, 1 if interpreter._tensor_equal(a.value, b.value) else 0)
-        return Value(TYPE_INT, 1 if a.value == b.value else 0)
+        return Value(TYPE_INT, 1 if interpreter._values_equal(a, b) else 0)
 
     def _in(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
         # IN(ANY: value, TNS: tensor):INT -> 1 if value is contained anywhere in tensor, else 0
@@ -937,7 +937,7 @@ class Builtins:
 
         lexer = Lexer(source_text, module_path)
         tokens = lexer.tokenize()
-        parser = Parser(tokens, module_path, source_text.splitlines())
+        parser = Parser(tokens, module_path, source_text.splitlines(), type_names=interpreter.type_registry.names())
         program = parser.parse()
 
         module_env = Environment()
@@ -1006,7 +1006,7 @@ class Builtins:
 
         lexer = Lexer(source_text, run_filename)
         tokens = lexer.tokenize()
-        parser = Parser(tokens, run_filename, source_text.splitlines())
+        parser = Parser(tokens, run_filename, source_text.splitlines(), type_names=interpreter.type_registry.names())
         program = parser.parse()
 
         # Execute parsed statements in the caller's environment so that
@@ -1065,7 +1065,16 @@ class Builtins:
             elif arg.type == TYPE_STR:
                 rendered.append(arg.value)  # type: ignore[arg-type]
             else:
-                raise ASMRuntimeError("PRINT accepts INT or STR arguments", location=loc, rewrite_rule="PRINT")
+                spec = interpreter.type_registry.get_optional(arg.type)
+                if spec is not None and spec.printable:
+                    ctx = TypeContext(interpreter=interpreter, location=loc)
+                    rendered.append(spec.to_str(ctx, arg))
+                else:
+                    raise ASMRuntimeError(
+                        "PRINT accepts INT or STR arguments",
+                        location=loc,
+                        rewrite_rule="PRINT",
+                    )
         text = "".join(rendered)
         # Forward to configured output sink only when not shushed.
         if not interpreter.shushed:
@@ -1094,7 +1103,7 @@ class Builtins:
         ___: Environment,
         location: SourceLocation,
     ) -> Value:
-        cond = self._condition_from_value(args[0]) if args else 0
+        cond = self._condition_from_value(interpreter, args[0], location) if args else 0
         if cond == 0:
             raise ASMRuntimeError("Assertion failed", location=location, rewrite_rule="ASSERT")
         return Value(TYPE_INT, 1)
@@ -1591,14 +1600,14 @@ class Builtins:
         tensor = self._map_tensor_int_binary(x, y, "MDIV", location, _div)
         return Value(TYPE_TNS, tensor)
 
-    def _msum(self, values: List[Value], location: SourceLocation) -> Value:
+    def _msum(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         tensors = [self._expect_tns(v, "MSUM", location) for v in values]
         acc = tensors[0]
         for tensor in tensors[1:]:
             acc = self._map_tensor_int_binary(acc, tensor, "MSUM", location, lambda a, b: a + b)
         return Value(TYPE_TNS, acc)
 
-    def _mprod(self, values: List[Value], location: SourceLocation) -> Value:
+    def _mprod(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         tensors = [self._expect_tns(v, "MPROD", location) for v in values]
         acc = tensors[0]
         for tensor in tensors[1:]:
@@ -1808,6 +1817,7 @@ class Interpreter:
         source: str,
         filename: str,
         verbose: bool,
+        services: Optional[RuntimeServices] = None,
         input_provider: Optional[Callable[[], str]] = None,
         output_sink: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -1816,9 +1826,66 @@ class Interpreter:
         self.filename = normalized_filename
         self.entry_filename = normalized_filename
         self.verbose = verbose
+        self.services = services or build_default_services()
+        self.type_registry: TypeRegistry = self.services.type_registry
+        self.hook_registry: HookRegistry = self.services.hook_registry
         self.input_provider = input_provider or (lambda: input(">>> "))
         self.output_sink = output_sink or (lambda text: print(text))
         self.builtins = Builtins()
+
+        # Install built-in types (INT/STR/TNS) into the registry with their
+        # concrete runtime behavior. These names are reserved by default
+        # services so extensions cannot redefine them.
+        if not self.type_registry.has(TYPE_INT):
+            self.type_registry.register(
+                TypeSpec(
+                    name=TYPE_INT,
+                    printable=True,
+                    condition_int=lambda ctx, v: int(getattr(v, "value", 0)),
+                    to_str=lambda ctx, v: ("-" + format(-int(v.value), "b")) if int(v.value) < 0 else format(int(v.value), "b"),
+                ),
+                seal=True,
+            )
+        if not self.type_registry.has(TYPE_STR):
+            def _str_cond(ctx: TypeContext, v: Value) -> int:
+                text = str(v.value)
+                if text == "":
+                    return 0
+                if set(text).issubset({"0", "1"}):
+                    return int(text, 2)
+                return 1
+
+            self.type_registry.register(
+                TypeSpec(
+                    name=TYPE_STR,
+                    printable=True,
+                    condition_int=_str_cond,
+                    to_str=lambda ctx, v: str(v.value),
+                ),
+                seal=True,
+            )
+        if not self.type_registry.has(TYPE_TNS):
+            self.type_registry.register(
+                TypeSpec(
+                    name=TYPE_TNS,
+                    printable=False,  # preserve historical PRINT behavior
+                    condition_int=lambda ctx, v: 1 if ctx.interpreter._tensor_truthy(v.value) else 0,
+                    to_str=lambda ctx, v: "<tensor>",
+                    equals=lambda ctx, a, b: ctx.interpreter._tensor_equal(a.value, b.value),
+                ),
+                seal=True,
+            )
+
+        # Attach extension-provided operators. These are appended to the builtins
+        # table but cannot override existing operator names.
+        for name, min_args, max_args, impl, _doc in self.services.operators:
+            self.builtins.register_extension_operator(
+                name=name,
+                min_args=min_args,
+                max_args=max_args,
+                impl=impl,
+            )
+
         self.functions: Dict[str, Function] = {}
         self.logger = StateLogger(verbose=verbose)
         self.logger.record(frame=None, location=None, statement="<seed>", rewrite_record={"rule": "SEED"})
@@ -1839,7 +1906,7 @@ class Interpreter:
     def parse(self) -> Program:
         lexer = Lexer(self.source, self.filename)
         tokens = lexer.tokenize()
-        parser = Parser(tokens, self.filename, self.source.splitlines())
+        parser = Parser(tokens, self.filename, self.source.splitlines(), type_names=self.type_registry.names())
         return parser.parse()
 
     def run(self) -> None:
@@ -1847,6 +1914,7 @@ class Interpreter:
         global_env = Environment()
         global_frame = self._new_frame("<top-level>", global_env, None)
         self.call_stack.append(global_frame)
+        self._emit_event("program_start", self, program, global_env)
         try:
             self._execute_block(program.statements, global_env)
         except BreakSignal as bs:
@@ -1854,10 +1922,12 @@ class Interpreter:
         except ContinueSignal:
             raise ASMRuntimeError("CONTINUE used outside loop", rewrite_rule="CONTINUE")
         except ASMRuntimeError as error:
+            self._emit_event("on_error", self, error)
             if self.logger.entries:
                 error.step_index = self.logger.entries[-1].step_index
             raise
         except Exception as exc:
+            self._emit_event("on_error", self, exc)
             # Convert unexpected Python-level exceptions into ASMRuntimeError
             # so callers (REPL/CLI) can format them using ASM-Lang tracebacks.
             loc = None
@@ -1869,6 +1939,7 @@ class Interpreter:
                 wrapped.step_index = self.logger.entries[-1].step_index
             raise wrapped
         else:
+            self._emit_event("program_end", self, 0)
             self.call_stack.pop()
 
     def _execute_block(self, statements: List[Statement], env: Environment) -> None:
@@ -1877,6 +1948,7 @@ class Interpreter:
         gotopoints: Dict[int, int] = frame.gotopoints
         while i < len(statements):
             statement = statements[i]
+            self._emit_event("before_statement", self, statement, env)
             if isinstance(statement, GotopointStatement):
                 self._log_step(rule=statement.__class__.__name__, location=statement.location)
                 gid = self._evaluate_expression(statement.expression, env)
@@ -1898,6 +1970,7 @@ class Interpreter:
                     )
                 gotopoints[key] = i
                 i += 1
+                self._emit_event("after_statement", self, statement, env)
                 continue
             try:
                 self._execute_statement(statement, env)
@@ -1909,7 +1982,9 @@ class Interpreter:
                         f"GOTO to undefined gotopoint '{target.value}'", location=statement.location, rewrite_rule="GOTO"
                     )
                 i = gotopoints[key]
+                self._emit_event("after_statement", self, statement, env)
                 continue
+            self._emit_event("after_statement", self, statement, env)
             i += 1
 
     def _execute_statement(self, statement: Statement, env: Environment) -> None:
@@ -2018,7 +2093,16 @@ class Interpreter:
                         rewrite_rule="RETURN",
                     )
                 else:
-                    value = Value(TYPE_INT, 0)
+                    spec = self.type_registry.get_optional(fn.return_type)
+                    if spec is not None and spec.default_value is not None:
+                        ctx = TypeContext(interpreter=self, location=statement.location)
+                        value = spec.default_value(ctx)
+                    else:
+                        raise ASMRuntimeError(
+                            f"Function {fn.name} must RETURN a {fn.return_type} value",
+                            location=statement.location,
+                            rewrite_rule="RETURN",
+                        )
             raise ReturnSignal(value)
         if isinstance(statement, BreakStatement):
             count_val = self._evaluate_expression(statement.expression, env)
@@ -2091,19 +2175,11 @@ class Interpreter:
             env.set(statement.counter, Value(TYPE_INT, self._expect_int(env.get(statement.counter), "FOR", statement.location) + 1))
 
     def _condition_int(self, value: Value, location: Optional[SourceLocation]) -> int:
-        if value.type == TYPE_INT:
-            return value.value  # type: ignore[return-value]
-        if value.type == TYPE_STR:
-            text = value.value  # type: ignore[assignment]
-            if text == "":
-                return 0
-            if set(text).issubset({"0", "1"}):
-                return int(text, 2)
-            return 1
-        if value.type == TYPE_TNS:
-            assert isinstance(value.value, Tensor)
-            return 1 if self._tensor_truthy(value.value) else 0
-        raise ASMRuntimeError("Unsupported type in condition", location=location)
+        spec = self.type_registry.get_optional(value.type)
+        if spec is None:
+            raise ASMRuntimeError("Unsupported type in condition", location=location)
+        ctx = TypeContext(interpreter=self, location=location)
+        return int(spec.condition_int(ctx, value))
 
     def _expect_int(self, value: Value, rule: str, location: Optional[SourceLocation]) -> int:
         if value.type != TYPE_INT:
@@ -2118,11 +2194,7 @@ class Interpreter:
 
     def _tensor_truthy(self, tensor: Tensor) -> bool:
         for item in tensor.data.flat:
-            if item.type == TYPE_INT and item.value != 0:
-                return True
-            if item.type == TYPE_STR and item.value != "":
-                return True
-            if item.type == TYPE_TNS and self._tensor_truthy(item.value):
+            if self._condition_int(item, None) != 0:
                 return True
         return False
 
@@ -2133,6 +2205,10 @@ class Interpreter:
             assert isinstance(left.value, Tensor)
             assert isinstance(right.value, Tensor)
             return self._tensor_equal(left.value, right.value)
+        spec = self.type_registry.get_optional(left.type)
+        if spec is not None and spec.equals is not None:
+            ctx = TypeContext(interpreter=self, location=None)
+            return bool(spec.equals(ctx, left, right))
         return left.value == right.value
 
     def _tensor_equal(self, left: Tensor, right: Tensor) -> bool:
@@ -2250,7 +2326,9 @@ class Interpreter:
             except ASMRuntimeError as err:
                 err.location = expression.location
                 if expression.name == "INPUT":
+                    self._emit_event("before_call", self, "INPUT", [], env, expression.location)
                     result = self.builtins.invoke(self, "INPUT", [], [], env, expression.location)
+                    self._emit_event("after_call", self, "INPUT", result, env, expression.location)
                     self._log_step(rule="INPUT", location=expression.location, extra={"args": [], "result": result.value})
                     return result
                 raise
@@ -2263,10 +2341,12 @@ class Interpreter:
                 dummy_args: List[Value] = [Value(TYPE_INT, 0)] * len(expression.args)
                 arg_nodes = [arg.expression for arg in expression.args]
                 try:
+                    self._emit_event("before_call", self, expression.name, [], env, expression.location)
                     result = self.builtins.invoke(self, expression.name, dummy_args, arg_nodes, env, expression.location)
                 except ASMRuntimeError:
                     self._log_step(rule="IMPORT", location=expression.location, extra={"module": module_label, "status": "error"})
                     raise
+                self._emit_event("after_call", self, expression.name, result, env, expression.location)
                 self._log_step(rule="IMPORT", location=expression.location, extra={"module": module_label, "result": result.value})
                 return result
             if expression.name in ("DEL", "EXIST"):
@@ -2279,10 +2359,12 @@ class Interpreter:
                 dummy_args: List[Value] = [Value(TYPE_INT, 0)] * len(expression.args)
                 arg_nodes = [arg.expression for arg in expression.args]
                 try:
+                    self._emit_event("before_call", self, expression.name, [], env, expression.location)
                     result = self.builtins.invoke(self, expression.name, dummy_args, arg_nodes, env, expression.location)
                 except ASMRuntimeError:
                     self._log_step(rule=expression.name, location=expression.location, extra={"args": None, "status": "error"})
                     raise
+                self._emit_event("after_call", self, expression.name, result, env, expression.location)
                 self._log_step(rule=expression.name, location=expression.location, extra={"args": None, "result": result.value})
                 return result
             positional_args: List[Value] = []
@@ -2320,6 +2402,7 @@ class Interpreter:
                         "keyword": {k: v.value for k, v in keyword_args.items()},
                     },
                 )
+                self._emit_event("before_call", self, func_name, positional_args, env, expression.location)
                 return self._call_user_function(
                     self.functions[func_name],
                     positional_args,
@@ -2346,6 +2429,7 @@ class Interpreter:
                             rewrite_rule=expression.name,
                         )
                 arg_nodes = [a.expression for a in expression.args]
+                self._emit_event("before_call", self, expression.name, positional_args, env, expression.location)
                 result = self.builtins.invoke(self, expression.name, positional_args, arg_nodes, env, expression.location)
             except ASMRuntimeError:
                 self._log_step(
@@ -2358,6 +2442,7 @@ class Interpreter:
                     },
                 )
                 raise
+            self._emit_event("after_call", self, expression.name, result, env, expression.location)
             self._log_step(
                 rule=expression.name,
                 location=expression.location,
@@ -2449,27 +2534,58 @@ class Interpreter:
                     location=call_location,
                     rewrite_rule=function.name,
                 )
+            self._emit_event("after_call", self, function.name, signal.value, env, call_location)
             return signal.value
         except ASMRuntimeError:
             raise
         else:
             self.call_stack.pop()
             if function.return_type == TYPE_INT:
-                return Value(TYPE_INT, 0)
+                result = Value(TYPE_INT, 0)
+                self._emit_event("after_call", self, function.name, result, env, call_location)
+                return result
             if function.return_type == TYPE_STR:
-                return Value(TYPE_STR, "")
+                result = Value(TYPE_STR, "")
+                self._emit_event("after_call", self, function.name, result, env, call_location)
+                return result
             if function.return_type == TYPE_TNS:
                 raise ASMRuntimeError(
                     f"Function {function.name} must return a tensor value",
                     location=call_location,
                     rewrite_rule=function.name,
                 )
-            return Value(TYPE_INT, 0)
+            # Extension-defined return types may have defaults; enforce via registry.
+            spec = self.type_registry.get_optional(function.return_type)
+            if spec is not None and spec.default_value is not None:
+                ctx = TypeContext(interpreter=self, location=call_location)
+                result = spec.default_value(ctx)
+                self._emit_event("after_call", self, function.name, result, env, call_location)
+                return result
+            raise ASMRuntimeError(
+                f"Function {function.name} must return {function.return_type}",
+                location=call_location,
+                rewrite_rule=function.name,
+            )
 
     def _new_frame(self, name: str, env: Environment, call_location: Optional[SourceLocation]) -> Frame:
         frame_id = f"f_{self.frame_counter:04d}"
         self.frame_counter += 1
         return Frame(name=name, env=env, frame_id=frame_id, call_location=call_location)
+
+    def _emit_event(self, event: str, *args: Any, **kwargs: Any) -> None:
+        try:
+            self.hook_registry.emit(event, *args, **kwargs)
+        except ASMRuntimeError:
+            raise
+        except Exception as exc:
+            loc = None
+            if self.logger.entries:
+                loc = self.logger.entries[-1].source_location
+            raise ASMRuntimeError(
+                f"Extension hook '{event}' failed: {exc}",
+                location=loc,
+                rewrite_rule="EXT",
+            )
 
     def _log_step(
         self,
@@ -2484,13 +2600,28 @@ class Interpreter:
         rewrite = {"rule": rule}
         if extra:
             rewrite.update(extra)
-        self.logger.record(
+        entry = self.logger.record(
             frame=frame,
             location=location,
             statement=statement,
             env_snapshot=env_snapshot,
             rewrite_record=rewrite,
         )
+
+        # Run extension step rules (every N steps) after recording.
+        try:
+            self.hook_registry.after_step(
+                self,
+                StepContext(step_index=entry.step_index, rule=rule, location=location, extra=extra),
+            )
+        except ASMRuntimeError:
+            raise
+        except Exception as exc:
+            raise ASMRuntimeError(
+                f"Extension step rule failed: {exc}",
+                location=location,
+                rewrite_rule="EXT",
+            )
 
 
 @dataclass
