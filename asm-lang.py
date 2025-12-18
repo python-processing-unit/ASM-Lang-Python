@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import sys
+import os
 from typing import List, Optional
 
 from extensions import ASMExtensionError, ReplContext, load_runtime_services
@@ -137,6 +138,26 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
             ext_paths.append(item)
         else:
             remaining.append(item)
+
+    # Initialize `program` early so subsequent checks can reference it safely.
+    program: Optional[str] = remaining[0] if remaining else None
+
+    # If the caller didn't specify any extensions, look for a pointer file named
+    # ".asmx" in the current working directory or (when a program file was
+    # provided) in the program's directory. If found, use it as the extension
+    # pointer file so the interpreter loads the extensions it points to.
+    if not ext_paths:
+        cwd_asmx = os.path.abspath(".asmx")
+        if os.path.exists(cwd_asmx):
+            ext_paths.append(cwd_asmx)
+        else:
+            # If a program path was given (and isn't literal source text),
+            # also check the program's directory for a .asmx pointer file.
+            if program and not args.source_mode:
+                program_dir = os.path.dirname(os.path.abspath(program))
+                program_asmx = os.path.join(program_dir, ".asmx")
+                if os.path.exists(program_asmx):
+                    ext_paths.append(program_asmx)
 
     try:
         services = load_runtime_services(ext_paths) if ext_paths else load_runtime_services([])

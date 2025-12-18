@@ -365,7 +365,7 @@ class Builtins:
         self._register_custom("REPLACE", 3, 3, self._replace)
         self._register_custom("MAIN", 0, 0, self._main)
         self._register_custom("OS", 0, 0, self._os)
-        self._register_custom("IMPORT", 1, 1, self._import)
+        self._register_custom("IMPORT", 1, 2, self._import)
         self._register_custom("RUN", 1, 1, self._run)
         self._register_custom("INPUT", 0, 1, self._input)
         self._register_custom("PRINT", 0, None, self._print)
@@ -900,10 +900,17 @@ class Builtins:
         env: Environment,
         location: SourceLocation,
     ) -> Value:
-        if len(arg_nodes) != 1 or not isinstance(arg_nodes[0], Identifier):
+        # Accept either IMPORT(module) or IMPORT(module, alias)
+        if len(arg_nodes) not in (1, 2) or not isinstance(arg_nodes[0], Identifier):
             raise ASMRuntimeError("IMPORT expects module name identifier", location=location, rewrite_rule="IMPORT")
 
         module_name = arg_nodes[0].name
+        if len(arg_nodes) == 2:
+            if not isinstance(arg_nodes[1], Identifier):
+                raise ASMRuntimeError("IMPORT alias must be an identifier", location=location, rewrite_rule="IMPORT")
+            export_prefix = arg_nodes[1].name
+        else:
+            export_prefix = module_name
         # If module was already imported earlier in this interpreter instance,
         # reuse the same Environment and function objects so all importers
         # observe the same namespace/instance.
@@ -913,9 +920,25 @@ class Builtins:
             for fn in interpreter.module_functions.get(module_name, []):
                 if fn.name not in interpreter.functions:
                     interpreter.functions[fn.name] = fn
+                # Also register alias-qualified function names when an alias was requested
+                if export_prefix != module_name:
+                    # fn.name is module_name.func; produce alias.func
+                    parts = fn.name.split(".", 1)
+                    if len(parts) == 2:
+                        _, unqualified = parts
+                        alias_name = f"{export_prefix}.{unqualified}"
+                        if alias_name not in interpreter.functions:
+                            created = Function(
+                                name=alias_name,
+                                params=fn.params,
+                                return_type=fn.return_type,
+                                body=fn.body,
+                                closure=cached_env,
+                            )
+                            interpreter.functions[alias_name] = created
 
             for k, v in cached_env.values.items():
-                dotted = f"{module_name}.{k}"
+                dotted = f"{export_prefix}.{k}"
                 env.set(dotted, v, declared_type=v.type)
             return Value(TYPE_INT, 0)
 
@@ -980,6 +1003,25 @@ class Builtins:
                 )
                 interpreter.functions[dotted_name] = created
                 registered_functions.append(created)
+
+        # If the caller requested an alias different from the module name,
+        # also register alias-qualified function entries pointing to the
+        # same function bodies so callers can invoke e.g. ALIAS.F().
+        if export_prefix != module_name:
+            for fn in registered_functions:
+                parts = fn.name.split(".", 1)
+                if len(parts) == 2:
+                    _, unqualified = parts
+                    alias_name = f"{export_prefix}.{unqualified}"
+                    if alias_name not in interpreter.functions:
+                        alias_fn = Function(
+                            name=alias_name,
+                            params=fn.params,
+                            return_type=fn.return_type,
+                            body=fn.body,
+                            closure=module_env,
+                        )
+                        interpreter.functions[alias_name] = alias_fn
 
         # Store module env and functions into the interpreter cache for reuse
         interpreter.module_cache[module_name] = module_env
