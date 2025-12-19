@@ -243,19 +243,42 @@ def _unique_module_name(path: str) -> str:
 
 
 def load_extension_module(path: str) -> Any:
+    # If the given path doesn't exist, and it is a relative path, try the
+    # interpreter's own `ext` directory as a fallback before failing.
     if not os.path.exists(path):
-        raise ASMExtensionError(f"Extension not found: {path}")
+        if not os.path.isabs(path):
+            interpreter_ext = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ext", path)
+            if os.path.exists(interpreter_ext):
+                path = interpreter_ext
+            else:
+                raise ASMExtensionError(f"Extension not found: {path}")
+        else:
+            raise ASMExtensionError(f"Extension not found: {path}")
     mod_name = _unique_module_name(path)
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
         raise ASMExtensionError(f"Failed to load extension module: {path}")
     module = importlib.util.module_from_spec(spec)
 
+    # Insert the module into sys.modules before execution so that code
+    # running during import (e.g. dataclass processing) can look up the
+    # module by name. Clean up/restore on failure.
+    prev_mod = sys.modules.get(mod_name)
+    sys.modules[mod_name] = module
+
     # Let extensions import siblings by temporarily prepending their directory.
     ext_dir = os.path.dirname(os.path.abspath(path))
     sys.path.insert(0, ext_dir)
     try:
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        try:
+            spec.loader.exec_module(module)  # type: ignore[union-attr]
+        except Exception:
+            # restore previous sys.modules state
+            if prev_mod is None:
+                sys.modules.pop(mod_name, None)
+            else:
+                sys.modules[mod_name] = prev_mod
+            raise
     finally:
         if sys.path and sys.path[0] == ext_dir:
             sys.path.pop(0)
@@ -277,9 +300,28 @@ def read_asmx(pointer_file: str) -> List[str]:
                 line = line.split("#", 1)[0].strip()
                 if not line:
                     continue
-            if not os.path.isabs(line):
-                line = os.path.abspath(os.path.join(base_dir, line))
-            out.append(line)
+            # Resolve relative entries: prefer pointer-file base dir, then
+            # cwd, then interpreter's ext/ directory as a final fallback.
+            candidate = line
+            if not os.path.isabs(candidate):
+                candidate_base = os.path.abspath(os.path.join(base_dir, candidate))
+                if os.path.exists(candidate_base):
+                    out.append(candidate_base)
+                    continue
+                candidate_cwd = os.path.abspath(candidate)
+                if os.path.exists(candidate_cwd):
+                    out.append(candidate_cwd)
+                    continue
+                interpreter_ext = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ext", candidate)
+                if os.path.exists(interpreter_ext):
+                    out.append(os.path.abspath(interpreter_ext))
+                    continue
+                raise ASMExtensionError(f"Extension referenced in {pointer_file} not found: {candidate}")
+            else:
+                if os.path.exists(candidate):
+                    out.append(os.path.abspath(candidate))
+                else:
+                    raise ASMExtensionError(f"Extension referenced in {pointer_file} not found: {candidate}")
     return out
 
 
@@ -287,8 +329,20 @@ def gather_extension_paths(paths: Sequence[str]) -> List[str]:
     expanded: List[str] = []
     for p in paths:
         if p.lower().endswith(".asmx"):
-            expanded.extend(read_asmx(p))
+            # Resolve pointer file path (absolute if possible) and expand it.
+            pointer = p
+            if not os.path.isabs(pointer):
+                pointer = os.path.abspath(pointer)
+            expanded.extend(read_asmx(pointer))
         else:
+            # If a relative extension path is provided and doesn't exist in
+            # the current working directory, try the interpreter's `ext`
+            # directory as a fallback.
+            if not os.path.isabs(p) and not os.path.exists(p):
+                alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ext", p)
+                if os.path.exists(alt):
+                    expanded.append(os.path.abspath(alt))
+                    continue
             expanded.append(p)
     # normalize
     return [os.path.abspath(p) for p in expanded]

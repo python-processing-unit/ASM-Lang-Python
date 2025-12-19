@@ -158,6 +158,13 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
                 program_asmx = os.path.join(program_dir, ".asmx")
                 if os.path.exists(program_asmx):
                     ext_paths.append(program_asmx)
+                else:
+                    # Also accept a pointer file that shares the program's
+                    # basename but uses the .asmx extension instead of the
+                    # program extension (e.g. program.asmln -> program.asmx).
+                    program_alt_asmx = os.path.splitext(os.path.abspath(program))[0] + ".asmx"
+                    if os.path.exists(program_alt_asmx):
+                        ext_paths.append(program_alt_asmx)
 
     try:
         services = load_runtime_services(ext_paths) if ext_paths else load_runtime_services([])
