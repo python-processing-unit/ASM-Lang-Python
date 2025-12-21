@@ -241,6 +241,41 @@ class ExtensionAPI:
         self._services.hook_registry.register_repl(name=name, runner=runner, ext_name=self._ext_name)
 
 
+def _extension_search_roots() -> List[str]:
+    """Return directories to search for the interpreter's built-in `ext/`.
+
+    When running as a frozen executable (e.g. PyInstaller), `__file__` points to
+    the extracted bundle, but users often ship extensions alongside the exe.
+    Prefer the exe directory, then the bundled extraction dir, then source dir.
+    """
+
+    roots: List[str] = []
+    if getattr(sys, "frozen", False):
+        roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if isinstance(meipass, str) and meipass:
+            roots.append(os.path.abspath(meipass))
+    roots.append(os.path.dirname(os.path.abspath(__file__)))
+    # de-dup while preserving order
+    out: List[str] = []
+    seen: set[str] = set()
+    for r in roots:
+        if r not in seen:
+            out.append(r)
+            seen.add(r)
+    return out
+
+
+def _resolve_in_builtin_ext(path: str) -> Optional[str]:
+    if os.path.isabs(path):
+        return None
+    for root in _extension_search_roots():
+        candidate = os.path.join(root, "ext", path)
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
 def _unique_module_name(path: str) -> str:
     base = os.path.basename(path)
     digest = hashlib.sha256(os.path.abspath(path).encode("utf-8")).hexdigest()[:12]
@@ -253,9 +288,9 @@ def load_extension_module(path: str) -> Any:
     # interpreter's own `ext` directory as a fallback before failing.
     if not os.path.exists(path):
         if not os.path.isabs(path):
-            interpreter_ext = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ext", path)
-            if os.path.exists(interpreter_ext):
-                path = interpreter_ext
+            resolved = _resolve_in_builtin_ext(path)
+            if resolved is not None:
+                path = resolved
             else:
                 raise ASMExtensionError(f"Extension not found: {path}")
         else:
@@ -309,22 +344,22 @@ def read_asmx(pointer_file: str) -> List[str]:
             # Resolve relative entries: prefer pointer-file base dir, then
             # cwd, then interpreter's ext/ directory as a final fallback.
             candidate = line
-            if not os.path.isabs(candidate):
+            if not os.path.isabs(candidate): # relative path
                 candidate_base = os.path.abspath(os.path.join(base_dir, candidate))
-                if os.path.exists(candidate_base):
+                if os.path.exists(candidate_base): # found relative to pointer file
                     out.append(candidate_base)
                     continue
                 candidate_cwd = os.path.abspath(candidate)
-                if os.path.exists(candidate_cwd):
+                if os.path.exists(candidate_cwd): # found relative to cwd
                     out.append(candidate_cwd)
                     continue
-                interpreter_ext = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ext", candidate)
-                if os.path.exists(interpreter_ext):
-                    out.append(os.path.abspath(interpreter_ext))
+                resolved = _resolve_in_builtin_ext(candidate)
+                if resolved is not None:
+                    out.append(resolved)
                     continue
                 raise ASMExtensionError(f"Extension referenced in {pointer_file} not found: {candidate}")
-            else:
-                if os.path.exists(candidate):
+            else: # absolute path
+                if os.path.exists(candidate): # found as absolute path
                     out.append(os.path.abspath(candidate))
                 else:
                     raise ASMExtensionError(f"Extension referenced in {pointer_file} not found: {candidate}")
@@ -345,9 +380,9 @@ def gather_extension_paths(paths: Sequence[str]) -> List[str]:
             # the current working directory, try the interpreter's `ext`
             # directory as a fallback.
             if not os.path.isabs(p) and not os.path.exists(p):
-                alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ext", p)
-                if os.path.exists(alt):
-                    expanded.append(os.path.abspath(alt))
+                resolved = _resolve_in_builtin_ext(p)
+                if resolved is not None:
+                    expanded.append(resolved)
                     continue
             expanded.append(p)
     # normalize

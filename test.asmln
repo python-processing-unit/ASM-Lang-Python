@@ -126,7 +126,36 @@ FUNC RUN_TESTS():INT{
 
     PRINT("Waveform library tests passed.")
 
+    # Extension tests (requires interpreter to be started with these extensions loaded)
+    PRINT()
+
+    PRINT("Running extension tests...")
+
+    # win32 extension
+    ASSERT(EQ(win32.WIN_SLEEP(0), 0))
+    INT: ticks = win32.WIN_CALL("kernel32", "GetTickCount64", "", "I")
+    ASSERT(GTE(ticks, 0))
+    INT: last_err = win32.WIN_LAST_ERROR()
+    ASSERT(GTE(last_err, 0))
+    PRINT("win32 extension tests passed.")
+
+    # networking extension (local-only; no external internet required)
+    INT: udp = networking.UDP_BIND("127.0.0.1", 0)
+    ASSERT(GT(udp, 0))
+    ASSERT(EQ(networking.UDP_CLOSE(udp), 0))
+    PRINT("networking extension tests passed.")
+
+    # wasapi extension (read-only queries)
+    STR: devname = wasapi.WASAPI_GET_DEFAULT_DEVICE_NAME()
+    ASSERT(GT(SLEN(devname), 0))
+    INT: volpct = wasapi.WASAPI_GET_MASTER_VOLUME()
+    ASSERT(GTE(volpct, 0))
+    ASSERT(LTE(volpct, 1100100))  # dec 100
+    PRINT("wasapi extension tests passed.")
+
     # If we reach here all tests passed; print success code and return
+    PRINT()
+    
     PRINT("All tests passed.")
     RETURN(0)
 }
