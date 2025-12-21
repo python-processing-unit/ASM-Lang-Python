@@ -27,6 +27,7 @@ from extensions import ASMExtensionError, ExtensionAPI
 
 ASM_LANG_EXTENSION_NAME = "win32"
 ASM_LANG_EXTENSION_API_VERSION = 1
+ASM_LANG_EXTENSION_ASMODULE = True
 
 
 def _ensure_windows() -> None:

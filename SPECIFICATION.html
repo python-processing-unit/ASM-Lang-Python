@@ -245,13 +245,20 @@ This section documents how the reference interpreter accepts program input and h
 
 - Extensions: the interpreter may also accept zero or more *extension* arguments that load Python extension modules before parsing and execution. Extensions may add new operators, new runtime types, and runtime hooks (including custom REPL implementations), but MUST NOT replace or modify existing built-in operators or types.
   - A Python extension is a `.py` file that defines `ASM_LANG_EXTENSION_API_VERSION = 1` (optional; defaults to 1) and a callable `asm_lang_register(ext)` entrypoint.
-  - A pointer file is a `.asmx` text file containing one extension path per line. Lines are trimmed; blank lines are ignored; lines beginning with `#` are comments. Relative paths are resolved relative to the `.asmx` file's directory; when a referenced path is not found there the interpreter will also try the current working directory and, as a final fallback, the interpreter's own `ext/` subdirectory.
-  - If a `.asmx` file is supplied as an argument, all of the linked extensions are loaded.
-  - If no explicit extension arguments are provided, the interpreter will automatically look for a pointer file named `.asmx` in the current working directory. When a program path is being executed (not when `-source` is used), the interpreter also checks the program's directory for a `.asmx` pointer file and will additionally accept a pointer file that shares the program's basename but ends with `.asmx` (for example `program.asmln` alongside `program.asmx`). If any pointer file is found the extensions listed in that pointer file are loaded as if supplied on the command line.
+  - A pointer file is a `.asmxt` text file containing one extension path per line. Lines are trimmed; blank lines are ignored; lines beginning with `#` are comments. Relative paths are resolved relative to the `.asmxt` file's directory; when a referenced path is not found there the interpreter will also try the current working directory and, as a final fallback, the interpreter's own `ext/` subdirectory.
+  - If a `.asmxt` file is supplied as an argument, all of the linked extensions are loaded.
+  - If no explicit extension arguments are provided, the interpreter will automatically look for a pointer file named `.asmxt` in the current working directory. When a program path is being executed (not when `-source` is used), the interpreter also checks the program's directory for a `.asmxt` pointer file and will additionally accept a pointer file that shares the program's basename but ends with `.asmxt` (for example `program.asmln` alongside `program.asmxt`). If any pointer file is found the extensions listed in that pointer file are loaded as if supplied on the command line.
   - Extensions are loaded before parsing so that extension-defined type names are recognized in typed assignments and function signatures.
   - If the only supplied positional inputs are extensions (and no program is supplied), the interpreter runs the REPL with the loaded extensions.
   - Hook surfaces exposed by the reference implementation include:
     - Operators: additional call names dispatched like built-ins.
+      Extensions may opt into module-qualifying all of their operators by
+      defining the module-level flag `ASM_LANG_EXTENSION_ASMODULE = True`.
+      When an extension sets this flag every operator it registers will be
+      exposed under the extension's name as a dotted prefix (for example, an
+      extension named `mymod` registering `FOO` will expose `mymod.FOO`). This
+      mirrors imported module-qualified bindings and avoids global name
+      collisions.
     - Per-N-steps rules: `every_n_steps(N, handler)` runs the handler after state-log step indices where `step_index % N == 0`.
     - Event-bound rules: `on_event(name, handler)` for the following event names:
       - `program_start(interpreter, program, env)`
@@ -270,7 +277,7 @@ Example invocations (illustrative):
 - File mode: `asm-lang program.asmln`
 - Source-string mode: `asm-lang -source "foo = INPUT\nPRINT(foo)" -verbose`
 - With extensions (file mode): `asm-lang myext.py program.asmln`
-- With pointer file: `asm-lang extensions.asmx program.asmln`
+- With pointer file: `asm-lang extensions.asmxt program.asmln`
 
 - REPL / Interactive mode: `asm-lang` (no program argument), or `asm-lang myext.py` (extensions only)
 

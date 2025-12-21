@@ -122,8 +122,8 @@ def run_repl(*, verbose: bool, services) -> int:
 
 def run_cli(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="ASM-Lang reference interpreter")
-    parser.add_argument("inputs", nargs="*", help="Program path/source and/or extension files (.py/.asmx)")
-    parser.add_argument("--ext", action="append", default=[], help="Extension path (.py) or pointer file (.asmx)")
+    parser.add_argument("inputs", nargs="*", help="Program path/source and/or extension files (.py/.asmxt)")
+    parser.add_argument("--ext", action="append", default=[], help="Extension path (.py) or pointer file (.asmxt)")
     parser.add_argument("-source", "--source", dest="source_mode", action="store_true", help="Treat program argument as literal source text")
     parser.add_argument("-verbose", "--verbose", dest="verbose", action="store_true", help="Emit env snapshots in tracebacks")
     parser.add_argument("--traceback-json", action="store_true", help="Also emit JSON traceback")
@@ -134,7 +134,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     remaining: List[str] = []
     for item in inputs:
         lower = item.lower()
-        if lower.endswith(".py") or lower.endswith(".asmx"):
+        if lower.endswith(".py") or lower.endswith(".asmxt"):
             ext_paths.append(item)
         else:
             remaining.append(item)
@@ -143,26 +143,26 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     program: Optional[str] = remaining[0] if remaining else None
 
     # If the caller didn't specify any extensions, look for a pointer file named
-    # ".asmx" in the current working directory or (when a program file was
+    # ".asmxt" in the current working directory or (when a program file was
     # provided) in the program's directory. If found, use it as the extension
     # pointer file so the interpreter loads the extensions it points to.
     if not ext_paths:
-        cwd_asmx = os.path.abspath(".asmx")
+        cwd_asmx = os.path.abspath(".asmxt")
         if os.path.exists(cwd_asmx):
             ext_paths.append(cwd_asmx)
         else:
             # If a program path was given (and isn't literal source text),
-            # also check the program's directory for a .asmx pointer file.
+            # also check the program's directory for a .asmxt pointer file.
             if program and not args.source_mode:
                 program_dir = os.path.dirname(os.path.abspath(program))
-                program_asmx = os.path.join(program_dir, ".asmx")
+                program_asmx = os.path.join(program_dir, ".asmxt")
                 if os.path.exists(program_asmx):
                     ext_paths.append(program_asmx)
                 else:
                     # Also accept a pointer file that shares the program's
-                    # basename but uses the .asmx extension instead of the
-                    # program extension (e.g. program.asmln -> program.asmx).
-                    program_alt_asmx = os.path.splitext(os.path.abspath(program))[0] + ".asmx"
+                    # basename but uses the .asmxt extension instead of the
+                    # program extension (e.g. program.asmln -> program.asmxt).
+                    program_alt_asmx = os.path.splitext(os.path.abspath(program))[0] + ".asmxt"
                     if os.path.exists(program_alt_asmx):
                         ext_paths.append(program_alt_asmx)
 

@@ -24,6 +24,7 @@ from extensions import ASMExtensionError
 
 ASM_LANG_EXTENSION_API_VERSION = 1
 ASM_LANG_EXTENSION_NAME = "wasapi"
+ASM_LANG_EXTENSION_ASMODULE = True
 
 
 if sys.platform != "win32":

@@ -153,9 +153,10 @@ class RuntimeServices:
 
 
 class ExtensionAPI:
-    def __init__(self, *, services: RuntimeServices, ext_name: str) -> None:
+    def __init__(self, *, services: RuntimeServices, ext_name: str, asmodule: bool = False) -> None:
         self._services = services
         self._ext_name = ext_name
+        self._asmodule = bool(asmodule)
 
     # ---- metadata ----
     def metadata(self, *, name: str, version: str = "0.0.0", requires_api: int = EXTENSION_API_VERSION) -> None:
@@ -173,7 +174,12 @@ class ExtensionAPI:
     ) -> None:
         if not name:
             raise ASMExtensionError("Operator name must be non-empty")
-        self._services.operators.append((name, int(min_args), None if max_args is None else int(max_args), impl, doc))
+        qualified = name
+        if self._asmodule:
+            prefix = str(self._ext_name)
+            if not qualified.startswith(prefix + "."):
+                qualified = f"{prefix}.{qualified}"
+        self._services.operators.append((qualified, int(min_args), None if max_args is None else int(max_args), impl, doc))
 
     def operator(self, name: str, min_args: int, max_args: Optional[int] = None, *, doc: str = ""):
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -287,7 +293,7 @@ def load_extension_module(path: str) -> Any:
 
 def read_asmx(pointer_file: str) -> List[str]:
     if not os.path.exists(pointer_file):
-        raise ASMExtensionError(f".asmx file not found: {pointer_file}")
+        raise ASMExtensionError(f".asmxt file not found: {pointer_file}")
     base_dir = os.path.dirname(os.path.abspath(pointer_file))
     out: List[str] = []
     with open(pointer_file, "r", encoding="utf-8") as handle:
@@ -328,7 +334,7 @@ def read_asmx(pointer_file: str) -> List[str]:
 def gather_extension_paths(paths: Sequence[str]) -> List[str]:
     expanded: List[str] = []
     for p in paths:
-        if p.lower().endswith(".asmx"):
+        if p.lower().endswith(".asmxt"):
             # Resolve pointer file path (absolute if possible) and expand it.
             pointer = p
             if not os.path.isabs(pointer):
@@ -372,6 +378,7 @@ def load_runtime_services(paths: Sequence[str]) -> RuntimeServices:
         if register is None or not callable(register):
             raise ASMExtensionError(f"Extension {path} must define callable asm_lang_register(ext)")
         ext_name = getattr(module, "ASM_LANG_EXTENSION_NAME", os.path.splitext(os.path.basename(path))[0])
-        ext = ExtensionAPI(services=services, ext_name=str(ext_name))
+        ext_asmodule = bool(getattr(module, "ASM_LANG_EXTENSION_ASMODULE", False))
+        ext = ExtensionAPI(services=services, ext_name=str(ext_name), asmodule=ext_asmodule)
         register(ext)
     return services

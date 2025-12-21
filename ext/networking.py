@@ -37,6 +37,7 @@ from extensions import ExtensionAPI
 
 ASM_LANG_EXTENSION_NAME = "networking"
 ASM_LANG_EXTENSION_API_VERSION = 1
+ASM_LANG_EXTENSION_ASMODULE = True
 
 
 # ---- Value helpers (import lazily inside operators to avoid cycles) ----

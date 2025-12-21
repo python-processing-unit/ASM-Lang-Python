@@ -18,6 +18,7 @@ from extensions import ExtensionAPI
 
 ASM_LANG_EXTENSION_NAME = "gc"
 ASM_LANG_EXTENSION_API_VERSION = 1
+ASM_LANG_EXTENSION_ASMODULE = False
 
 
 # ---- Interpreter monkeypatching ----
