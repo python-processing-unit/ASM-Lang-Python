@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
+from fractions import Fraction
+
 from lexer import ASMParseError, Token
 
 
@@ -139,7 +141,7 @@ class TensorSetStatement(Statement):
 
 @dataclass
 class Literal(Expression):
-    value: Union[int, str]
+    value: Union[int, float, str]
     literal_type: str
 
 
@@ -172,8 +174,26 @@ class Parser:
         self.tokens = tokens
         self.filename = filename
         self.source_lines = source_lines
-        self.type_names = set(type_names) if type_names is not None else {"INT", "STR", "TNS"}
+        self.type_names = set(type_names) if type_names is not None else {"INT", "FLT", "STR", "TNS"}
         self.index = 0
+
+    def _parse_flt_literal(self, raw: str, *, token: Token) -> float:
+        # raw is of the form [-]?[01]+\.[01]+
+        text = raw.strip()
+        neg = text.startswith("-")
+        if neg:
+            text = text[1:]
+        if "." not in text:
+            raise ASMParseError(f"Invalid FLT literal at line {token.line}")
+        left, right = text.split(".", 1)
+        if left == "" or right == "":
+            raise ASMParseError(f"Invalid FLT literal at line {token.line}")
+        if not set(left).issubset({"0", "1"}) or not set(right).issubset({"0", "1"}):
+            raise ASMParseError(f"Invalid FLT literal at line {token.line}")
+        numerator = (int(left, 2) << len(right)) + int(right, 2)
+        denom = 1 << len(right)
+        value = float(Fraction(numerator, denom))
+        return -value if neg else value
 
     def parse(self) -> Program:
         statements: List[Statement] = self._parse_statements(stop_tokens={"EOF"})
@@ -361,6 +381,10 @@ class Parser:
             else:
                 value = int(sval, 2)
             return Literal(location=self._location_from_token(number), value=value, literal_type="INT")
+        if token.type == "FLOAT":
+            flt: Token = self._consume("FLOAT")
+            value = self._parse_flt_literal(flt.value, token=flt)
+            return Literal(location=self._location_from_token(flt), value=value, literal_type="FLT")
         if token.type == "STRING":
             string_token = self._consume("STRING")
             return Literal(location=self._location_from_token(string_token), value=string_token.value, literal_type="STR")

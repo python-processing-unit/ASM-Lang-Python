@@ -46,6 +46,7 @@ from parser import (
 
 
 TYPE_INT = "INT"
+TYPE_FLT = "FLT"
 TYPE_STR = "STR"
 TYPE_TNS = "TNS"
 
@@ -314,17 +315,19 @@ def _as_bool(value: int) -> int:
 class Builtins:
     def __init__(self) -> None:
         self.table: Dict[str, BuiltinFunction] = {}
-        self._register_int_only("ADD", 2, lambda a, b: a + b)
-        self._register_int_only("SUB", 2, lambda a, b: a - b)
-        self._register_int_only("MUL", 2, lambda a, b: a * b)
-        self._register_int_only("DIV", 2, self._safe_div)
+        # Numeric operators that support INT and FLT (no mixing).
+        self._register_custom("ADD", 2, 2, self._add)
+        self._register_custom("SUB", 2, 2, self._sub)
+        self._register_custom("MUL", 2, 2, self._mul)
+        self._register_custom("DIV", 2, 2, self._div)
         self._register_int_only("CDIV", 2, self._safe_cdiv)
-        self._register_int_only("MOD", 2, self._safe_mod)
-        self._register_int_only("POW", 2, self._safe_pow)
-        self._register_int_only("NEG", 1, lambda a: -a)
-        self._register_int_only("ABS", 1, abs)
-        self._register_int_only("GCD", 2, math.gcd)
-        self._register_int_only("LCM", 2, self._lcm)
+        self._register_custom("MOD", 2, 2, self._mod)
+        self._register_custom("POW", 2, 2, self._pow)
+        self._register_custom("ROOT", 2, 2, self._root)
+        self._register_custom("NEG", 1, 1, self._neg)
+        self._register_custom("ABS", 1, 1, self._abs)
+        self._register_custom("GCD", 2, 2, self._gcd)
+        self._register_custom("LCM", 2, 2, self._lcm_num)
         self._register_int_only("BAND", 2, lambda a, b: a & b)
         self._register_int_only("BOR", 2, lambda a, b: a | b)
         self._register_int_only("BXOR", 2, lambda a, b: a ^ b)
@@ -340,10 +343,10 @@ class Builtins:
         self._register_custom("ARGV", 0, 0, self._argv)
         self._register_custom("EQ", 2, 2, self._eq)
         self._register_custom("IN", 2, 2, self._in)
-        self._register_int_only("GT", 2, lambda a, b: 1 if a > b else 0)
-        self._register_int_only("LT", 2, lambda a, b: 1 if a < b else 0)
-        self._register_int_only("GTE", 2, lambda a, b: 1 if a >= b else 0)
-        self._register_int_only("LTE", 2, lambda a, b: 1 if a <= b else 0)
+        self._register_custom("GT", 2, 2, self._gt)
+        self._register_custom("LT", 2, 2, self._lt)
+        self._register_custom("GTE", 2, 2, self._gte)
+        self._register_custom("LTE", 2, 2, self._lte)
         self._register_variadic("SUM", 1, self._sum)
         self._register_variadic("PROD", 1, self._prod)
         self._register_variadic("MAX", 1, self._max)
@@ -355,9 +358,10 @@ class Builtins:
         self._register_custom("ILEN", 1, 1, self._ilen)
         self._register_variadic("JOIN", 1, self._join)
         self._register_custom("SPLIT", 1, 2, self._split)
-        self._register_int_only("LOG", 1, self._safe_log)
+        self._register_custom("LOG", 1, 1, self._log)
         self._register_int_only("CLOG", 1, self._safe_clog)
         self._register_custom("INT", 1, 1, self._int_op)
+        self._register_custom("FLT", 1, 1, self._flt_op)
         self._register_custom("STR", 1, 1, self._str_op)
         self._register_custom("UPPER", 1, 1, self._upper)
         self._register_custom("LOWER", 1, 1, self._lower)
@@ -379,8 +383,10 @@ class Builtins:
         self._register_custom("EXIST", 1, 1, self._exist)
         self._register_custom("EXPORT", 2, 2, self._export)
         self._register_custom("ISINT", 1, 1, self._isint)
+        self._register_custom("ISFLT", 1, 1, self._isflt)
         self._register_custom("ISSTR", 1, 1, self._isstr)
         self._register_custom("ISTNS", 1, 1, self._istns)
+        self._register_custom("ROUND", 1, 3, self._round)
         self._register_custom("READFILE", 1, 2, self._readfile)
         self._register_custom("BYTES", 1, 1, self._bytes)
         self._register_custom("WRITEFILE", 2, 3, self._writefile)
@@ -469,6 +475,185 @@ class Builtins:
             raise ASMRuntimeError(f"{rule} expects integer arguments", location=location, rewrite_rule=rule)
         assert isinstance(value.value, int)
         return value.value
+
+    def _expect_flt(self, value: Value, rule: str, location: SourceLocation) -> float:
+        if value.type != TYPE_FLT:
+            raise ASMRuntimeError(f"{rule} expects float arguments", location=location, rewrite_rule=rule)
+        assert isinstance(value.value, float)
+        return value.value
+
+    def _expect_num_pair(self, args: List[Value], rule: str, location: SourceLocation) -> Tuple[str, Any, Any]:
+        if len(args) != 2:
+            raise ASMRuntimeError(f"{rule} expects 2 arguments", location=location, rewrite_rule=rule)
+        a, b = args[0], args[1]
+        if a.type != b.type:
+            raise ASMRuntimeError(f"{rule} cannot mix INT and FLT", location=location, rewrite_rule=rule)
+        if a.type == TYPE_INT:
+            return TYPE_INT, self._expect_int(a, rule, location), self._expect_int(b, rule, location)
+        if a.type == TYPE_FLT:
+            return TYPE_FLT, self._expect_flt(a, rule, location), self._expect_flt(b, rule, location)
+        raise ASMRuntimeError(f"{rule} expects INT or FLT arguments", location=location, rewrite_rule=rule)
+
+    def _expect_num_unary(self, args: List[Value], rule: str, location: SourceLocation) -> Tuple[str, Any]:
+        if len(args) != 1:
+            raise ASMRuntimeError(f"{rule} expects 1 argument", location=location, rewrite_rule=rule)
+        a = args[0]
+        if a.type == TYPE_INT:
+            return TYPE_INT, self._expect_int(a, rule, location)
+        if a.type == TYPE_FLT:
+            return TYPE_FLT, self._expect_flt(a, rule, location)
+        raise ASMRuntimeError(f"{rule} expects INT or FLT arguments", location=location, rewrite_rule=rule)
+
+    def _add(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "ADD", location)
+        return Value(t, a + b)
+
+    def _sub(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "SUB", location)
+        return Value(t, a - b)
+
+    def _mul(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "MUL", location)
+        return Value(t, a * b)
+
+    def _div(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "DIV", location)
+        if t == TYPE_INT:
+            return Value(TYPE_INT, self._safe_div(a, b))
+        if b == 0.0:
+            raise ASMRuntimeError("Division by zero", rewrite_rule="DIV", location=location)
+        return Value(TYPE_FLT, a / b)
+
+    def _mod(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "MOD", location)
+        if t == TYPE_INT:
+            return Value(TYPE_INT, self._safe_mod(a, b))
+        if b == 0.0:
+            raise ASMRuntimeError("Division by zero", rewrite_rule="MOD", location=location)
+        return Value(TYPE_FLT, a % abs(b))
+
+    def _pow(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "POW", location)
+        if t == TYPE_INT:
+            return Value(TYPE_INT, self._safe_pow(a, b))
+        return Value(TYPE_FLT, pow(a, b))
+
+    def _root(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, x, n = self._expect_num_pair(args, "ROOT", location)
+        # _expect_num_pair enforces both args are same numeric type (INT or FLT)
+        # Common checks
+        if (t == TYPE_INT and n == 0) or (t == TYPE_FLT and n == 0.0):
+            raise ASMRuntimeError("ROOT exponent must be non-zero", rewrite_rule="ROOT", location=location)
+
+        if t == TYPE_INT:
+            # INT path: n and x are ints
+            # Allow negative x. For negative n, an integer result only exists in
+            # trivial cases (|x| == 1). Disallow otherwise to avoid non-integer results.
+            if n < 0:
+                if x == 0:
+                    raise ASMRuntimeError("Division by zero", rewrite_rule="ROOT", location=location)
+                if abs(x) != 1:
+                    raise ASMRuntimeError("Negative ROOT exponent yields non-integer result", rewrite_rule="ROOT", location=location)
+                # 1**anything == 1 ; (-1)**odd == -1 ; reciprocal of ±1 is itself
+                return Value(TYPE_INT, x)
+
+            # n > 0: compute integer nth root (floor root for x>=0, sign for odd n)
+            k = n
+            if k == 1:
+                return Value(TYPE_INT, x)
+            if x >= 0:
+                lo = 0
+                hi = 1
+                while pow(hi, k) <= x:
+                    hi <<= 1
+                while lo + 1 < hi:
+                    mid = (lo + hi) // 2
+                    if pow(mid, k) <= x:
+                        lo = mid
+                    else:
+                        hi = mid
+                return Value(TYPE_INT, lo)
+            # x < 0: only odd roots yield integer results
+            if k % 2 == 0:
+                raise ASMRuntimeError("Even root of negative integer", rewrite_rule="ROOT", location=location)
+            ax = -x
+            lo = 0
+            hi = 1
+            while pow(hi, k) <= ax:
+                hi <<= 1
+            while lo + 1 < hi:
+                mid = (lo + hi) // 2
+                if pow(mid, k) <= ax:
+                    lo = mid
+                else:
+                    hi = mid
+            return Value(TYPE_INT, -lo)
+
+        # FLT path
+        # n may be negative; handle sign rules for negative base
+        if x == 0.0 and n < 0.0:
+            raise ASMRuntimeError("Division by zero", rewrite_rule="ROOT", location=location)
+        if x < 0.0:
+            # Negative base: allow only when n is integer and odd
+            if not float(n).is_integer() or int(n) % 2 == 0:
+                raise ASMRuntimeError("ROOT of negative float requires odd integer root", rewrite_rule="ROOT", location=location)
+            # Compute signed result; pow handles fractional positive n
+            sign = -1.0
+            return Value(TYPE_FLT, sign * pow(abs(x), 1.0 / n))
+        # general positive base (or zero with non-negative n)
+        return Value(TYPE_FLT, pow(x, 1.0 / n))
+
+    def _neg(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a = self._expect_num_unary(args, "NEG", location)
+        return Value(t, -a)
+
+    def _abs(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a = self._expect_num_unary(args, "ABS", location)
+        return Value(t, abs(a))
+
+    def _gcd(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "GCD", location)
+        if t == TYPE_INT:
+            return Value(TYPE_INT, math.gcd(a, b))
+        # For floats, only accept integer-valued inputs.
+        if not float(a).is_integer() or not float(b).is_integer():
+            raise ASMRuntimeError("GCD expects integer-valued floats", location=location, rewrite_rule="GCD")
+        return Value(TYPE_FLT, float(math.gcd(int(a), int(b))))
+
+    def _lcm_num(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a, b = self._expect_num_pair(args, "LCM", location)
+        if t == TYPE_INT:
+            return Value(TYPE_INT, self._lcm(a, b))
+        if not float(a).is_integer() or not float(b).is_integer():
+            raise ASMRuntimeError("LCM expects integer-valued floats", location=location, rewrite_rule="LCM")
+        ia, ib = int(a), int(b)
+        if ia == 0 or ib == 0:
+            return Value(TYPE_FLT, 0.0)
+        return Value(TYPE_FLT, float(abs(ia * ib) // math.gcd(ia, ib)))
+
+    def _gt(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        _, a, b = self._expect_num_pair(args, "GT", location)
+        return Value(TYPE_INT, 1 if a > b else 0)
+
+    def _lt(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        _, a, b = self._expect_num_pair(args, "LT", location)
+        return Value(TYPE_INT, 1 if a < b else 0)
+
+    def _gte(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        _, a, b = self._expect_num_pair(args, "GTE", location)
+        return Value(TYPE_INT, 1 if a >= b else 0)
+
+    def _lte(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        _, a, b = self._expect_num_pair(args, "LTE", location)
+        return Value(TYPE_INT, 1 if a <= b else 0)
+
+    def _log(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        t, a = self._expect_num_unary(args, "LOG", location)
+        if t == TYPE_INT:
+            return Value(TYPE_INT, self._safe_log(a))
+        if a <= 0.0:
+            raise ASMRuntimeError("LOG argument must be > 0", rewrite_rule="LOG", location=location)
+        return Value(TYPE_FLT, float(math.floor(math.log2(a))))
 
     def _expect_str(self, value: Value, rule: str, location: SourceLocation) -> str:
         if value.type != TYPE_STR:
@@ -582,15 +767,34 @@ class Builtins:
 
     # Variadic helpers
     def _sum(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
-        ints = [self._expect_int(v, "SUM", location) for v in values]
-        return Value(TYPE_INT, sum(ints))
+        if not values:
+            raise ASMRuntimeError("SUM requires at least one argument", rewrite_rule="SUM")
+        first_type = values[0].type
+        if first_type == TYPE_INT:
+            ints = [self._expect_int(v, "SUM", location) for v in values]
+            return Value(TYPE_INT, sum(ints))
+        if first_type == TYPE_FLT:
+            flts = [self._expect_flt(v, "SUM", location) for v in values]
+            return Value(TYPE_FLT, float(sum(flts)))
+        raise ASMRuntimeError("SUM expects INT or FLT arguments", location=location, rewrite_rule="SUM")
 
     def _prod(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
-        ints = [self._expect_int(v, "PROD", location) for v in values]
-        result = 1
-        for val in ints:
-            result *= val
-        return Value(TYPE_INT, result)
+        if not values:
+            raise ASMRuntimeError("PROD requires at least one argument", rewrite_rule="PROD")
+        first_type = values[0].type
+        if first_type == TYPE_INT:
+            ints = [self._expect_int(v, "PROD", location) for v in values]
+            result = 1
+            for val in ints:
+                result *= val
+            return Value(TYPE_INT, result)
+        if first_type == TYPE_FLT:
+            flts = [self._expect_flt(v, "PROD", location) for v in values]
+            result_f = 1.0
+            for val in flts:
+                result_f *= val
+            return Value(TYPE_FLT, float(result_f))
+        raise ASMRuntimeError("PROD expects INT or FLT arguments", location=location, rewrite_rule="PROD")
 
     def _max(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         if not values:
@@ -599,10 +803,13 @@ class Builtins:
         if first_type == TYPE_TNS:
             raise ASMRuntimeError("MAX cannot operate on tensors", rewrite_rule="MAX", location=location)
         if any(v.type != first_type for v in values):
-            raise ASMRuntimeError("MAX cannot mix integers and strings", rewrite_rule="MAX", location=location)
+            raise ASMRuntimeError("MAX cannot mix values of different types", rewrite_rule="MAX", location=location)
         if first_type == TYPE_INT:
             ints = [self._expect_int(v, "MAX", location) for v in values]
             return Value(TYPE_INT, max(ints))
+        if first_type == TYPE_FLT:
+            flts = [self._expect_flt(v, "MAX", location) for v in values]
+            return Value(TYPE_FLT, float(max(flts)))
         strs = [self._expect_str(v, "MAX", location) for v in values]
         longest = max(strs, key=len)
         return Value(TYPE_STR, longest)
@@ -614,10 +821,13 @@ class Builtins:
         if first_type == TYPE_TNS:
             raise ASMRuntimeError("MIN cannot operate on tensors", rewrite_rule="MIN", location=location)
         if any(v.type != first_type for v in values):
-            raise ASMRuntimeError("MIN cannot mix integers and strings", rewrite_rule="MIN", location=location)
+            raise ASMRuntimeError("MIN cannot mix values of different types", rewrite_rule="MIN", location=location)
         if first_type == TYPE_INT:
             ints = [self._expect_int(v, "MIN", location) for v in values]
             return Value(TYPE_INT, min(ints))
+        if first_type == TYPE_FLT:
+            flts = [self._expect_flt(v, "MIN", location) for v in values]
+            return Value(TYPE_FLT, float(min(flts)))
         strs = [self._expect_str(v, "MIN", location) for v in values]
         shortest = min(strs, key=len)
         return Value(TYPE_STR, shortest)
@@ -763,12 +973,133 @@ class Builtins:
         val = args[0]
         if val.type == TYPE_INT:
             return val
+        if val.type == TYPE_FLT:
+            # Explicit conversion only; truncate toward zero.
+            return Value(TYPE_INT, int(float(val.value)))
         text = self._expect_str(val, "INT", location)
         if text == "":
             return Value(TYPE_INT, 0)
         if set(text).issubset({"0", "1"}):
             return Value(TYPE_INT, int(text, 2))
         return Value(TYPE_INT, 1)
+
+    def _flt_op(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        val = args[0]
+        if val.type == TYPE_FLT:
+            return val
+        if val.type == TYPE_INT:
+            return Value(TYPE_FLT, float(self._expect_int(val, "FLT", location)))
+        text = self._expect_str(val, "FLT", location)
+        if text == "":
+            return Value(TYPE_FLT, 0.0)
+        # Accept binary int strings and binary float strings.
+        neg = text.startswith("-")
+        core = text[1:] if neg else text
+        if "." in core:
+            left, right = core.split(".", 1)
+            if left and right and set(left + right).issubset({"0", "1"}):
+                num = (int(left, 2) << len(right)) + int(right, 2)
+                den = 1 << len(right)
+                out = float(num) / float(den)
+                return Value(TYPE_FLT, -out if neg else out)
+        if set(core).issubset({"0", "1"}):
+            out = float(int(core, 2))
+            return Value(TYPE_FLT, -out if neg else out)
+        return Value(TYPE_FLT, 1.0)
+
+    def _isflt(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        if not arg_nodes or not isinstance(arg_nodes[0], Identifier):
+            raise ASMRuntimeError("ISFLT requires an identifier argument", location=location, rewrite_rule="ISFLT")
+        name = arg_nodes[0].name
+        if not env.has(name):
+            return Value(TYPE_INT, 0)
+        try:
+            val = env.get(name)
+        except ASMRuntimeError as err:
+            err.location = location
+            raise
+        return Value(TYPE_INT, 1 if val.type == TYPE_FLT else 0)
+
+    def _round(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        # ROUND(FLT: float, STR: mode = "floor", INT: ndigits = 0):FLT
+        x = self._expect_flt(args[0], "ROUND", location)
+        mode = "floor"
+        ndigits = 0
+        if len(args) >= 2:
+            second = args[1]
+            if second.type == TYPE_INT:
+                ndigits = self._expect_int(second, "ROUND", location)
+            else:
+                mode = self._expect_str(second, "ROUND", location)
+        if len(args) >= 3:
+            mode = self._expect_str(args[1], "ROUND", location)
+            ndigits = self._expect_int(args[2], "ROUND", location)
+        mode_norm = mode.strip().lower()
+        if mode_norm == "ceil":
+            mode_norm = "ceiling"
+        if mode_norm == "half-up":
+            mode_norm = "logical"
+
+        from fractions import Fraction
+
+        frac = Fraction(*float(x).as_integer_ratio())
+        if ndigits >= 0:
+            scale = 1 << ndigits
+            scaled = frac * scale
+        else:
+            scale = 1 << (-ndigits)
+            scaled = frac / scale
+
+        # scaled is a rational; round it to an integer per mode.
+        n = scaled.numerator
+        d = scaled.denominator
+        if d == 0:
+            raise ASMRuntimeError("ROUND internal error", location=location, rewrite_rule="ROUND")
+
+        def _floor_div(a: int, b: int) -> int:
+            return a // b
+
+        def _ceil_div(a: int, b: int) -> int:
+            return -((-a) // b)
+
+        if mode_norm == "floor":
+            q = _floor_div(n, d)
+        elif mode_norm == "ceiling":
+            q = _ceil_div(n, d)
+        elif mode_norm == "zero":
+            q = int(n / d)
+        elif mode_norm == "logical":
+            # Half-up: ties go away from zero.
+            if n >= 0:
+                q = _floor_div(2 * n + d, 2 * d)
+            else:
+                q = _ceil_div(2 * n - d, 2 * d)
+        else:
+            raise ASMRuntimeError(
+                "ROUND mode must be one of floor, ceiling/ceil, zero, logical/half-up",
+                location=location,
+                rewrite_rule="ROUND",
+            )
+
+        if ndigits >= 0:
+            out = Fraction(q, scale)
+        else:
+            out = Fraction(q * scale, 1)
+        return Value(TYPE_FLT, float(out))
 
     def _str_op(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
         val = args[0]
@@ -1517,9 +1848,78 @@ class Builtins:
         )
         return Tensor(shape=list(x.shape), data=data)
 
+    def _map_tensor_numeric_binary(
+        self,
+        x: Tensor,
+        y: Tensor,
+        rule: str,
+        location: SourceLocation,
+        op_int: Callable[[int, int], int],
+        op_flt: Callable[[float, float], float],
+    ) -> Tensor:
+        if x.shape != y.shape:
+            raise ASMRuntimeError(f"{rule} requires tensors with identical shapes", location=location, rewrite_rule=rule)
+        if x.data.size == 0:
+            # Shapes are validated elsewhere to be positive, but keep safe.
+            return Tensor(shape=list(x.shape), data=np.array([], dtype=object))
+        first_type = next(iter(x.data.flat)).type
+        if first_type not in (TYPE_INT, TYPE_FLT):
+            raise ASMRuntimeError(f"{rule} expects INT or FLT tensor elements", location=location, rewrite_rule=rule)
+        if any(v.type != first_type for v in x.data.flat) or any(v.type != first_type for v in y.data.flat):
+            raise ASMRuntimeError(f"{rule} cannot mix INT and FLT", location=location, rewrite_rule=rule)
+        if first_type == TYPE_INT:
+            data = np.array(
+                [
+                    Value(TYPE_INT, op_int(self._expect_int(a, rule, location), self._expect_int(b, rule, location)))
+                    for a, b in zip(x.data.flat, y.data.flat)
+                ],
+                dtype=object,
+            )
+            return Tensor(shape=list(x.shape), data=data)
+        data = np.array(
+            [
+                Value(TYPE_FLT, op_flt(float(a.value), float(b.value)))
+                for a, b in zip(x.data.flat, y.data.flat)
+            ],
+            dtype=object,
+        )
+        return Tensor(shape=list(x.shape), data=data)
+
     def _map_tensor_int_scalar(self, tensor: Tensor, scalar: int, rule: str, location: SourceLocation, op: Callable[[int, int], int]) -> Tensor:
         data = np.array(
             [Value(TYPE_INT, op(self._expect_int(entry, rule, location), scalar)) for entry in tensor.data.flat],
+            dtype=object,
+        )
+        return Tensor(shape=list(tensor.shape), data=data)
+
+    def _map_tensor_numeric_scalar(
+        self,
+        tensor: Tensor,
+        scalar: Value,
+        rule: str,
+        location: SourceLocation,
+        op_int: Callable[[int, int], int],
+        op_flt: Callable[[float, float], float],
+    ) -> Tensor:
+        if tensor.data.size == 0:
+            return Tensor(shape=list(tensor.shape), data=np.array([], dtype=object))
+        first_type = next(iter(tensor.data.flat)).type
+        if first_type not in (TYPE_INT, TYPE_FLT):
+            raise ASMRuntimeError(f"{rule} expects INT or FLT tensor elements", location=location, rewrite_rule=rule)
+        if scalar.type != first_type:
+            raise ASMRuntimeError(f"{rule} cannot mix INT and FLT", location=location, rewrite_rule=rule)
+        if any(v.type != first_type for v in tensor.data.flat):
+            raise ASMRuntimeError(f"{rule} tensor has mixed element types", location=location, rewrite_rule=rule)
+        if first_type == TYPE_INT:
+            sc = self._expect_int(scalar, rule, location)
+            data = np.array(
+                [Value(TYPE_INT, op_int(self._expect_int(entry, rule, location), sc)) for entry in tensor.data.flat],
+                dtype=object,
+            )
+            return Tensor(shape=list(tensor.shape), data=data)
+        scf = float(scalar.value)
+        data = np.array(
+            [Value(TYPE_FLT, op_flt(float(entry.value), scf)) for entry in tensor.data.flat],
             dtype=object,
         )
         return Tensor(shape=list(tensor.shape), data=data)
@@ -1597,7 +1997,7 @@ class Builtins:
     ) -> Value:
         x = self._expect_tns(args[0], "MADD", location)
         y = self._expect_tns(args[1], "MADD", location)
-        tensor = self._map_tensor_int_binary(x, y, "MADD", location, lambda a, b: a + b)
+        tensor = self._map_tensor_numeric_binary(x, y, "MADD", location, lambda a, b: a + b, lambda a, b: a + b)
         return Value(TYPE_TNS, tensor)
 
     def _msub(
@@ -1610,7 +2010,7 @@ class Builtins:
     ) -> Value:
         x = self._expect_tns(args[0], "MSUB", location)
         y = self._expect_tns(args[1], "MSUB", location)
-        tensor = self._map_tensor_int_binary(x, y, "MSUB", location, lambda a, b: a - b)
+        tensor = self._map_tensor_numeric_binary(x, y, "MSUB", location, lambda a, b: a - b, lambda a, b: a - b)
         return Value(TYPE_TNS, tensor)
 
     def _mmul(
@@ -1623,7 +2023,7 @@ class Builtins:
     ) -> Value:
         x = self._expect_tns(args[0], "MMUL", location)
         y = self._expect_tns(args[1], "MMUL", location)
-        tensor = self._map_tensor_int_binary(x, y, "MMUL", location, lambda a, b: a * b)
+        tensor = self._map_tensor_numeric_binary(x, y, "MMUL", location, lambda a, b: a * b, lambda a, b: a * b)
         return Value(TYPE_TNS, tensor)
 
     def _mdiv(
@@ -1636,24 +2036,29 @@ class Builtins:
     ) -> Value:
         x = self._expect_tns(args[0], "MDIV", location)
         y = self._expect_tns(args[1], "MDIV", location)
-        def _div(a: int, b: int) -> int:
+        def _div_int(a: int, b: int) -> int:
             return self._safe_div(a, b)
 
-        tensor = self._map_tensor_int_binary(x, y, "MDIV", location, _div)
+        def _div_flt(a: float, b: float) -> float:
+            if b == 0.0:
+                raise ASMRuntimeError("Division by zero", rewrite_rule="MDIV", location=location)
+            return a / b
+
+        tensor = self._map_tensor_numeric_binary(x, y, "MDIV", location, _div_int, _div_flt)
         return Value(TYPE_TNS, tensor)
 
     def _msum(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         tensors = [self._expect_tns(v, "MSUM", location) for v in values]
         acc = tensors[0]
         for tensor in tensors[1:]:
-            acc = self._map_tensor_int_binary(acc, tensor, "MSUM", location, lambda a, b: a + b)
+            acc = self._map_tensor_numeric_binary(acc, tensor, "MSUM", location, lambda a, b: a + b, lambda a, b: a + b)
         return Value(TYPE_TNS, acc)
 
     def _mprod(self, _: "Interpreter", values: List[Value], location: SourceLocation) -> Value:
         tensors = [self._expect_tns(v, "MPROD", location) for v in values]
         acc = tensors[0]
         for tensor in tensors[1:]:
-            acc = self._map_tensor_int_binary(acc, tensor, "MPROD", location, lambda a, b: a * b)
+            acc = self._map_tensor_numeric_binary(acc, tensor, "MPROD", location, lambda a, b: a * b, lambda a, b: a * b)
         return Value(TYPE_TNS, acc)
 
     def _tadd(
@@ -1665,8 +2070,8 @@ class Builtins:
         location: SourceLocation,
     ) -> Value:
         tensor = self._expect_tns(args[0], "TADD", location)
-        scalar = self._expect_int(args[1], "TADD", location)
-        result = self._map_tensor_int_scalar(tensor, scalar, "TADD", location, lambda a, b: a + b)
+        scalar = args[1]
+        result = self._map_tensor_numeric_scalar(tensor, scalar, "TADD", location, lambda a, b: a + b, lambda a, b: a + b)
         return Value(TYPE_TNS, result)
 
     def _tsub(
@@ -1678,8 +2083,8 @@ class Builtins:
         location: SourceLocation,
     ) -> Value:
         tensor = self._expect_tns(args[0], "TSUB", location)
-        scalar = self._expect_int(args[1], "TSUB", location)
-        result = self._map_tensor_int_scalar(tensor, scalar, "TSUB", location, lambda a, b: a - b)
+        scalar = args[1]
+        result = self._map_tensor_numeric_scalar(tensor, scalar, "TSUB", location, lambda a, b: a - b, lambda a, b: a - b)
         return Value(TYPE_TNS, result)
 
     def _tmul(
@@ -1691,8 +2096,8 @@ class Builtins:
         location: SourceLocation,
     ) -> Value:
         tensor = self._expect_tns(args[0], "TMUL", location)
-        scalar = self._expect_int(args[1], "TMUL", location)
-        result = self._map_tensor_int_scalar(tensor, scalar, "TMUL", location, lambda a, b: a * b)
+        scalar = args[1]
+        result = self._map_tensor_numeric_scalar(tensor, scalar, "TMUL", location, lambda a, b: a * b, lambda a, b: a * b)
         return Value(TYPE_TNS, result)
 
     def _tdiv(
@@ -1704,12 +2109,17 @@ class Builtins:
         location: SourceLocation,
     ) -> Value:
         tensor = self._expect_tns(args[0], "TDIV", location)
-        scalar = self._expect_int(args[1], "TDIV", location)
+        scalar = args[1]
 
-        def _div(val: int, sc: int) -> int:
+        def _div_int(val: int, sc: int) -> int:
             return self._safe_div(val, sc)
 
-        result = self._map_tensor_int_scalar(tensor, scalar, "TDIV", location, _div)
+        def _div_flt(val: float, sc: float) -> float:
+            if sc == 0.0:
+                raise ASMRuntimeError("Division by zero", rewrite_rule="TDIV", location=location)
+            return val / sc
+
+        result = self._map_tensor_numeric_scalar(tensor, scalar, "TDIV", location, _div_int, _div_flt)
         return Value(TYPE_TNS, result)
 
     def _tpow(
@@ -1721,8 +2131,15 @@ class Builtins:
         location: SourceLocation,
     ) -> Value:
         tensor = self._expect_tns(args[0], "TPOW", location)
-        scalar = self._expect_int(args[1], "TPOW", location)
-        result = self._map_tensor_int_scalar(tensor, scalar, "TPOW", location, lambda a, b: self._safe_pow(a, b))
+        scalar = args[1]
+
+        def _pow_int(a: int, b: int) -> int:
+            return self._safe_pow(a, b)
+
+        def _pow_flt(a: float, b: float) -> float:
+            return pow(a, b)
+
+        result = self._map_tensor_numeric_scalar(tensor, scalar, "TPOW", location, _pow_int, _pow_flt)
         return Value(TYPE_TNS, result)
 
     def _cl(
@@ -1885,6 +2302,32 @@ class Interpreter:
                     printable=True,
                     condition_int=lambda ctx, v: int(getattr(v, "value", 0)),
                     to_str=lambda ctx, v: ("-" + format(-int(v.value), "b")) if int(v.value) < 0 else format(int(v.value), "b"),
+                ),
+                seal=True,
+            )
+
+        if not self.type_registry.has(TYPE_FLT):
+            def _flt_to_str(ctx: TypeContext, v: Value) -> str:
+                x = float(v.value)
+                if x == 0.0:
+                    return "0.0"
+                neg = x < 0
+                num, den = float(abs(x)).as_integer_ratio()
+                # den is a power of two for IEEE754 floats.
+                k = den.bit_length() - 1
+                whole = num >> k
+                rem = num & ((1 << k) - 1)
+                whole_bits = format(whole, "b")
+                frac_bits = format(rem, f"0{k}b") if k > 0 else "0"
+                frac_bits = frac_bits.rstrip("0") or "0"
+                return ("-" if neg else "") + whole_bits + "." + frac_bits
+
+            self.type_registry.register(
+                TypeSpec(
+                    name=TYPE_FLT,
+                    printable=True,
+                    condition_int=lambda ctx, v: 0 if float(v.value) == 0.0 else 1,
+                    to_str=_flt_to_str,
                 ),
                 seal=True,
             )
@@ -2584,6 +3027,10 @@ class Interpreter:
             self.call_stack.pop()
             if function.return_type == TYPE_INT:
                 result = Value(TYPE_INT, 0)
+                self._emit_event("after_call", self, function.name, result, env, call_location)
+                return result
+            if function.return_type == TYPE_FLT:
+                result = Value(TYPE_FLT, 0.0)
                 self._emit_event("after_call", self, function.name, result, env, call_location)
                 return result
             if function.return_type == TYPE_STR:

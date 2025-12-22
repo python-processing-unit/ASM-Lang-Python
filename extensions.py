@@ -394,6 +394,7 @@ def build_default_services() -> RuntimeServices:
     # Reserve built-in type names so extensions cannot redefine them.
     # The interpreter will register their concrete semantics at runtime.
     services.type_registry.seal("INT")
+    services.type_registry.seal("FLT")
     services.type_registry.seal("STR")
     services.type_registry.seal("TNS")
     return services

@@ -45,7 +45,7 @@ This document specifies an imperative programming language with a binary integer
 
 ## 1. Overview
 
-The language is a familiar statement-based, imperative language. Programs consist of variable declarations via assignment, expressions, and control-flow constructs such as `IF`, `ELSIF`, `ELSE`, `WHILE`, and `FOR`. ASM-Lang now has three runtime data types: binary integers (`INT`), strings (`STR`), and non-scalar tensors (`TNS`). Identifiers, function parameters, and return values are statically typed; the type of every symbol must be declared when it is first introduced. Computation proceeds by evaluating expressions and executing statements in sequence, with explicit constructs for branching and looping. Input and output are modeled through built-in operators, in particular `INPUT` and `PRINT`.
+The language is a familiar statement-based, imperative language. Programs consist of variable declarations via assignment, expressions, and control-flow constructs such as `IF`, `ELSIF`, `ELSE`, `WHILE`, and `FOR`. ASM-Lang has four runtime data types: binary integers (`INT`), binary floating-point numbers (`FLT`, IEEE754), strings (`STR`), and non-scalar tensors (`TNS`). Identifiers, function parameters, and return values are statically typed; the type of every symbol must be declared when it is first introduced. Computation proceeds by evaluating expressions and executing statements in sequence, with explicit constructs for branching and looping. Input and output are modeled through built-in operators, in particular `INPUT` and `PRINT`.
 
 The interpreter compiles source code into a single initial configuration (the seed state), which includes the program code, an empty variable environment, and an initial I/O history. It then advances execution by repeatedly applying a single, fixed small-step transition function that is independent of the particular program. A disassembler and log view expose all intermediate states so that every step and every control-flow decision is inspectable and replay-able.
 
@@ -93,9 +93,17 @@ This deliberately-permissive identifier character set preserves an unambiguous l
 
 ## 3. Data Model
 
-ASM-Lang supports three literal data types: binary integers, strings, and non-scalar tensors.
+ASM-Lang supports four runtime data types: binary integers, binary floating-point numbers, strings, and non-scalar tensors.
 
 Binary integer literal: an unsigned non-empty sequence of `{0,1}` (for example, `0`, `1`, `1011`), or a signed literal formed by a leading `-` (the dash is part of the literal, not an operator) followed by optional spaces, tabs, or carriage returns and then a non-empty sequence of `{0,1}`. A `-` that does not immediately introduce a literal is a syntax error.
+
+Binary floating-point literal: an IEEE754 floating-point value written in binary fixed-point notation `n.n`, where both sides of the radix point are non-empty sequences of `{0,1}`. Examples:
+
+- `0.1` denotes one-half.
+- `0.01` denotes one-quarter.
+- `0.11` denotes three-quarters.
+
+FLT literals MUST NOT begin with the radix point (so `.1` is invalid). A leading `-` may prefix a FLT literal using the same rules as for integers (the dash is part of the literal and is not an operator).
 
 String literal: a sequence of ASCII characters enclosed in either double quotation marks (`"`) or single quotation marks (`'`) with no escape processing. A string opened with one delimiter must be closed with the same delimiter; other quotation characters appearing inside the string are treated as ordinary characters. Newlines are not permitted inside string literals. The literal's value is the contained character sequence.
 
@@ -111,7 +119,11 @@ Tensor values carry a fixed shape (dimension count and length per dimension). Ea
 
 All other tensor operations are non-mutating: tensor literals and tensor-valued built-ins produce new tensor values rather than mutating existing ones. Because indexed assignment mutates a tensor object, if the same tensor value is aliased (bound to multiple identifiers, passed as an argument, or stored inside another tensor), all aliases observe the mutation.
 
-Every runtime value has a static type: `INT`, `STR`, or `TNS`. Integers are conceptually unbounded mathematical integers. Strings are byte strings of ASCII characters. Tensors are non-scalar aggregates whose elements may be `INT`, `STR`, or `TNS`. When a Boolean interpretation is required, `INT` treats 0 as false and non-zero as true; `STR` treats the empty string as false and any non-empty string as true; `TNS` is true if any contained element is true by these rules, otherwise false. Control-flow conditions (`IF`, `ELSIF`, `WHILE`) and `ASSERT` convert strings to integers using the same rules as the `INT` built-in; tensors are first reduced to their Boolean truth value (1 or 0).
+Every runtime value has a static type: `INT`, `FLT`, `STR`, or `TNS`. Integers are conceptually unbounded mathematical integers. Floats are IEEE754 binary floating-point numbers. Strings are byte strings of ASCII characters. Tensors are non-scalar aggregates whose elements may be `INT`, `FLT`, `STR`, or `TNS`.
+
+When a Boolean interpretation is required, `INT` treats 0 as false and non-zero as true; `FLT` treats 0.0 as false and any non-zero value as true; `STR` treats the empty string as false and any non-empty string as true; `TNS` is true if any contained element is true by these rules, otherwise false. Control-flow conditions (`IF`, `ELSIF`, `WHILE`) and `ASSERT` convert strings to integers using the same rules as the `INT` built-in; tensors are first reduced to their Boolean truth value (1 or 0).
+
+`INT` and `FLT` are not interoperable: no implicit conversion occurs. Operators that accept both types require that all numeric arguments have the same numeric type.
 
 ## 4. Statements and Control Flow
 
@@ -343,7 +355,8 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `MUL(INT:a, INT:b):INT` ; a * b
 - `DIV(INT: a, INT: b):INT` ; floor(a / b)
 - `CDIV(INT: a, INT: b):INT` ; ceil(a / b)
-- `POW(INT: a, INT: b):INT` ; a ^ b (b >= 0)
+- `POW(INT: a, INT: b):INT` ; a ^ b
+- `ROOT(INT|FLT: x, INT|FLT: n):INT|FLT` ; nth root of `x`. No mixing of `INT` and `FLT` is allowed. For `INT` arguments `n` must be non-zero; positive `n` returns the integer nth root (largest integer r with r^n <= x for x >= 0); negative `n` yields an integer result only for `x` equal to `1` or `-1` (reciprocal is integer), and `x < 0` requires odd `n`. For `FLT` arguments the result is `x^(1/n)` (negative `n` allowed); negative `x` is allowed only when `n` is an odd integer. Division by zero is an error.
 - `MOD(INT: a, INT: b):INT` ; remainder of a / b
 - `NEG(INT: a):INT` ; -a (additive inverse)
 - `ABS(INT: a):INT` ; absolute value of a
@@ -366,38 +379,51 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 
 ### Comparisons
 - `EQ(ANY: a, ANY: b):INT` ; 1 if a == b else 0
-- `GT(INT: a, INT: b):INT` ; 1 if a > b else 0
-- `LT(INT: a, INT: b):INT` ; 1 if a < b else 0
-- `GTE(INT: a, INT: b):INT` ; 1 if a >= b else 0
-- `LTE(INT: a, INT: b):INT` ; 1 if a <= b else 0
+- `GT(INT|FLT: a, INT|FLT: b):INT` ; 1 if a > b else 0 (no mixing INT/FLT)
+- `LT(INT|FLT: a, INT|FLT: b):INT` ; 1 if a < b else 0 (no mixing INT/FLT)
+- `GTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if a >= b else 0 (no mixing INT/FLT)
+- `LTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if a <= b else 0 (no mixing INT/FLT)
 
 ### Aggregates / Utilities
-- `MAX(INT|STR: a1, ..., INT|STR: aN):INT|STR` ; `INT` -> numeric max; `STR` -> longest string; mixing `INT` and `STR` or supplying tensors is an error
-- `MIN(INT|STR: a1, ..., INT|STR: aN):INT|STR` ; `INT` -> numeric min; `STR` -> shortest string; mixing `INT` and `STR` or supplying tensors is an error
-- `SUM(INT: a1, ..., INT: aN):INT` ; sum of the arguments
+- `MAX(INT|FLT|STR: a1, ..., INT|FLT|STR: aN):INT|FLT|STR` ; numeric max for `INT`/`FLT`, longest for `STR`; supplying tensors or mixing types is an error
+- `MIN(INT|FLT|STR: a1, ..., INT|FLT|STR: aN):INT|FLT|STR` ; numeric min for `INT`/`FLT`, shortest for `STR`; supplying tensors or mixing types is an error
+- `SUM(INT|FLT: a1, ..., INT|FLT: aN):INT|FLT` ; sum of the arguments (no mixing INT/FLT)
 - `LEN(INT|STR: a1, ..., INT|STR: aN):INT` ; number of arguments (N), rejects tensors
 - `ALL(ANY: a1, ..., ANY: aN):INT` ; Boolean AND (empty string -> false, non-empty -> true)
 - `ANY(ANY: a1, ..., ANY: aN):INT` ; Boolean OR (empty string -> false, non-empty -> true)
 - `JOIN(INT|STR: a1, INT|STR: a2, ..., INT|STR: aN):INT|STR` ; `INT` -> concatenate binary spellings with consistent sign; `STR` -> concatenate strings; mixing `INT` and `STR` or supplying tensors raises an error
 - `PROD(INT: a1, ..., INT: aN):INT` ; product of the arguments
+- `PROD(INT|FLT: a1, ..., INT|FLT: aN):INT|FLT` ; product of the arguments (no mixing INT/FLT)
 
 ### Tensor operations
 - `SHAPE(TNS: tensor):TNS` — Returns the tensor's shape as a 1D `TNS` (vector) of `INT` lengths (one entry per dimension).
 - `TLEN(TNS: tensor, INT: dim):INT` — Returns the length of the specified 1-based dimension. Errors if `dim` is out of range.
 - `FILL(TNS: tensor, ANY: value):TNS` — Returns a new tensor with the same shape as `tensor`, filled with `value`. The supplied value`s type must match the existing element type at every position.
 - `TNS(TNS: shape, ANY: value):TNS` — Creates a new `TNS` with the shape described by a 1D `TNS` of positive `INT` lengths, filled with `value`.
-- `MADD/MSUB/MMUL/MDIV(TNS: x, TNS: y):TNS` — Elementwise addition, subtraction, multiplication, and integer division. Shapes must match; all elements must be `INT`. `MDIV` raises on division by zero.
-- `MSUM(TNS: t1, ..., TNS: tN):TNS` — Elementwise sum across tensors. Shapes must match; elements must be `INT`.
-- `MPROD(TNS: t1, ..., TNS: tN):TNS` — Elementwise product across tensors. Shapes must match; elements must be `INT`.
-- `TADD(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar addition
-- `TSUB(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar subtraction
-- `TMUL(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar multiplication
-- `TDIV(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar integer division. Division by zero is an error.
-- `TPOW(TNS: x, INT: y):TNS` - Elementwise `INT`-scalar exponentiation. Negative exponents are an error.
+- `MADD/MSUB/MMUL/MDIV(TNS: x, TNS: y):TNS` — Elementwise addition, subtraction, multiplication, and division. Shapes must match; all elements must be `INT` or all `FLT` (no mixing). Division by zero is an error.
+- `MSUM(TNS: t1, ..., TNS: tN):TNS` — Elementwise sum across tensors. Shapes must match; elements must be all `INT` or all `FLT` (no mixing).
+- `MPROD(TNS: t1, ..., TNS: tN):TNS` — Elementwise product across tensors. Shapes must match; elements must be all `INT` or all `FLT` (no mixing).
+- `TADD/TSSUB/TMUL/TDIV/TPOW(TNS: x, INT|FLT: y):TNS` — Tensor-scalar arithmetic. Tensor elements and scalar must both be `INT` or both be `FLT` (no mixing). Division by zero is an error.
 
 ### Logarithms
 - `LOG(INT: a):INT` ; floor(log2(a)) for a > 0
+- `LOG(FLT: a):FLT` ; floor(log2(a)) for a > 0
 - `CLOG(INT: a):INT` ; ceil(log2(a)) for a > 0
+
+### Numeric conversions / predicates
+- `INT(ANY: a):INT` — Explicit conversion to integer. If `a` is `FLT`, conversion truncates toward zero.
+- `FLT(ANY: a):FLT` — Explicit conversion to float.
+- `ISFLT(SYMBOL: name):INT` — 1 if `name` is bound and has type `FLT`, otherwise 0.
+
+### Rounding
+- `ROUND(FLT: float, STR: mode="floor", INT: ndigits=0):FLT` — Round `float` to `ndigits` places right of the radix point (binary places; `ndigits` may be negative). Modes are:
+
+- `ROUND(FLT: float, STR: mode="floor", INT: ndigits=0):FLT` — Round `float` to `ndigits` places right of the radix point (binary places; `ndigits` may be negative). When exactly two arguments are supplied and the second is an `INT`, it is treated as `ndigits` with the mode defaulting to `"floor"`. Modes are:
+
+  - `"floor"` — round toward $-\infty$
+  - `"ceiling"` or `"ceil"` — round toward $+\infty$
+  - `"zero"` — round toward zero
+  - `"logical"` or `"half-up"` — round half away from zero
 
 ### Module operations:
 - `IMPORT(MODULE: name)` or `IMPORT(MODULE: name, SYMBOL: alias)` — Loads another source file and exposes it as a distinct module namespace. When an optional alias identifier is supplied, the imported module's bindings are exposed under the `alias` prefix rather than the module's own name (for example, `IMPORT(mod, ali)` makes `ali.F()` valid while `mod.F()` is not).
@@ -433,7 +459,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `ARGV():TNS` — Returns the interpreter's argument vector as a one-dimensional `TNS` of `STR`. The tensor's elements are the command-line argument strings supplied to the process, in the same order as the process `argv`, with index 1 holding the interpreter's invocation entry (TNS indices are 1-based).
 
 ### Control / Function / Statement Signatures (statement position)
-- Assignment: `TYPE : identifier = expression` on first use; subsequent assignments omit TYPE but must match the original type. TYPE is `INT`, `STR`, or `TNS`. Tensor elements may be reassigned with `identifier[i1,...,iN] = expression` (indices are 1-based with negative-index support, and the stored type at that element must not change).
+- Assignment: `TYPE : identifier = expression` on first use; subsequent assignments omit TYPE but must match the original type. TYPE is `INT`, `FLT`, `STR`, or `TNS`. Tensor elements may be reassigned with `identifier[i1,...,iN] = expression` (indices are 1-based with negative-index support, and the stored type at that element must not change).
 - Block: `{ statement1 ... statementN }`
 - `IF(condition){ block }` (optional `ELSIF(condition){ block }` ... `ELSE{ block }`)
 - `WHILE(condition){ block }`
@@ -447,7 +473,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `GOTO(n)` ; jump to a previously-registered gotopoint with identifier `n` (`INT` or `STR`) within the same function or top-level scope; runtime error if not registered in that scope
 
 ### Notes
-- Built-ins are statically typed. Boolean contexts treat `INT` 0 as false and non-zero as true; `STR` is false when empty and true when non-empty unless a rule explicitly converts via `INT`. A `TNS` is true if any element is true by those `INT`/`STR` rules.
+- Built-ins are statically typed. Boolean contexts treat `INT` 0 as false and non-zero as true; `FLT` is false when 0.0 and true otherwise; `STR` is false when empty and true when non-empty unless a rule explicitly converts via `INT`. A `TNS` is true if any element is true by those rules.
 - Argument evaluation order: left-to-right.
 - User-defined functions use the same call syntax as built-ins; keyword arguments are permitted only after positional arguments and only for parameters that declare defaults. Built-ins reject keyword arguments except that `READFILE` and `WRITEFILE` accept an optional `coding=` keyword. When a keyword parameter is omitted, its default expression is evaluated at call time in the function's defining environment.
 

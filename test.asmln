@@ -4,6 +4,7 @@ IMPORT(prime)
 IMPORT(decimal)
 IMPORT(path)
 IMPORT(waveforms)
+IMPORT(stats)
 
 FUNC RUN_TESTS():INT{
     PRINT("Running library tests...")
@@ -125,6 +126,42 @@ FUNC RUN_TESTS():INT{
     ASSERT(EQ(high[11], 0))
 
     PRINT("Waveform library tests passed.")
+
+    # Stats library tests
+    TNS: svals1 = [1,10,11]  # values: 1,2,3 (binary literals)
+    ASSERT( EQ( stats.MEAN(svals1), 10.0 ) )     # mean = 2.0
+    ASSERT( EQ( stats.MEDIAN(svals1), 10.0 ) )   # median = 2.0
+
+    TNS: svals2 = [1,10,11,100]  # values: 1,2,3,4
+    ASSERT( EQ( stats.MEAN(svals2), 10.1 ) )     # mean = 2.5 (10.1)
+    ASSERT( EQ( stats.MEDIAN(svals2), 10.1 ) )   # median = 2.5 (10.1)
+
+    # Quantile: q=0 should return minimum
+    ASSERT( EQ( stats.QUANTILE(svals1, 0, 10), 1.0 ) )
+
+    # Variance / stdev (population) for [1,2,3] is small -> integer division yields 0
+    ASSERT( EQ( stats.VARIANCE(svals1, 0), 0.0 ) )
+    ASSERT( EQ( stats.STDEV(svals1, 0), 0.0 ) )
+
+    TNS: mode1 = stats.MODE(svals1)
+    # All values appear once -> all are modes (length 3 -> binary '11')
+    ASSERT( EQ( TLEN(mode1, 1), 11 ) )
+
+    # Histogram with 2 bins (bins=10 binary) -> first bin count 2, second bin 1
+    TNS: hist1 = stats.HISTOGRAM(svals1, 10)
+    ASSERT( EQ( TLEN(hist1, 1), 10 ) )
+    ASSERT( EQ( hist1[1], 10 ) )
+    ASSERT( EQ( hist1[10], 1 ) )
+
+    TNS: desc1 = stats.DESCRIBE(svals1)
+    ASSERT( EQ( TLEN(desc1, 1), 101 ) )   # length 5 -> binary 101
+    ASSERT( EQ( desc1[1], 11 ) )          # count = 3
+    ASSERT( EQ( desc1[10], 10 ) )          # mean = 2
+    ASSERT( EQ( desc1[11], 0 ) )           # stdev (as implemented)
+    ASSERT( EQ( desc1[100], 1 ) )           # min
+    ASSERT( EQ( desc1[101], 11 ) )          # max
+
+    PRINT("Stats library tests passed.")
 
     # Extension tests (requires interpreter to be started with these extensions loaded)
     PRINT()

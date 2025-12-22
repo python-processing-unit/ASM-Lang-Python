@@ -107,8 +107,22 @@ class Lexer:
 
     def _consume_unsigned_number(self) -> Token:
         line, col = self.line, self.column
-        digits = self._consume_binary_digits()
-        return Token("NUMBER", digits, line, col)
+        whole = self._consume_binary_digits()
+        # Support FLT literals of the form n.n (binary digits on both sides).
+        # Note: '.' remains valid inside identifiers, so we only treat it as a
+        # radix point when the token started as a number.
+        if not self._eof and self._peek() == ".":
+            # Lookahead for at least one binary digit after '.' (allowing line
+            # continuations via '^').
+            saved_index, saved_line, saved_col = self.index, self.line, self.column
+            self._advance()  # consume '.'
+            frac = self._consume_binary_digits()
+            if frac == "":
+                # Not a valid float literal; restore and treat as integer.
+                self.index, self.line, self.column = saved_index, saved_line, saved_col
+                return Token("NUMBER", whole, line, col)
+            return Token("FLOAT", f"{whole}.{frac}", line, col)
+        return Token("NUMBER", whole, line, col)
 
     def _consume_string(self) -> Token:
         line, col = self.line, self.column
@@ -141,8 +155,17 @@ class Lexer:
             self._advance()
         if self._eof or self._peek() not in "01":
             raise ASMParseError(f"Expected binary digits after '-' at {self.filename}:{line}:{col}")
-        digits = self._consume_binary_digits()
-        return Token("NUMBER", "-" + digits, line, col)
+        whole = self._consume_binary_digits()
+        if not self._eof and self._peek() == ".":
+            saved_index, saved_line, saved_col = self.index, self.line, self.column
+            self._advance()  # consume '.'
+            frac = self._consume_binary_digits()
+            if frac == "":
+                # Not a valid float literal; restore and treat as integer.
+                self.index, self.line, self.column = saved_index, saved_line, saved_col
+                return Token("NUMBER", "-" + whole, line, col)
+            return Token("FLOAT", f"-{whole}.{frac}", line, col)
+        return Token("NUMBER", "-" + whole, line, col)
 
     def _consume_binary_digits(self) -> str:
         digits: List[str] = []
