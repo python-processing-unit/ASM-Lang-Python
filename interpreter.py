@@ -1,4 +1,5 @@
 from __future__ import annotations
+import gc
 import json
 import subprocess
 import math
@@ -375,6 +376,7 @@ class Builtins:
         self._register_custom("PRINT", 0, None, self._print)
         self._register_custom("ASSERT", 1, 1, self._assert)
         self._register_custom("DEL", 1, 1, self._delete)
+        self._register_custom("GC", 0, 1, self._gc)
         self._register_custom("FREEZE", 1, 1, self._freeze)
         self._register_custom("THAW", 1, 1, self._thaw)
         self._register_custom("PERMAFREEZE", 1, 1, self._permafreeze)
@@ -1576,6 +1578,22 @@ class Builtins:
             err.location = location
             raise
         return Value(TYPE_INT, 0)
+
+    def _gc(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        generation = None
+        if args:
+            generation = self._expect_int(args[0], "GC", location)
+            if generation < 0 or generation > 2:
+                raise ASMRuntimeError("GC expects generation 0, 1, or 2", location=location, rewrite_rule="GC")
+        collected = gc.collect() if generation is None else gc.collect(generation)
+        return Value(TYPE_INT, collected)
 
     def _freeze(
         self,

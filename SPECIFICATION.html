@@ -334,6 +334,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `ASSERT(ANY: a)` ; crashes if `INT`-style` truthiness of `a` is 0
 - `MAIN():INT` — Returns `1` when the call site belongs to the primary program file (the file passed as the interpreter's first argument, or `<string>` when `-source` is used). Returns `0` when executed from code that came from an `IMPORT` (including nested imports). The result is determined solely by the source file that contains the call expression, not by the caller's call stack.
 - `DEL(SYMBOL: x)` ; delete variable `x` from environment
+- `GC()` or `GC(INT: generation):INT` ; trigger a garbage collection pass and return the count of unreachable objects (generation must be 0, 1, or 2)
 - `EXIT()` or `EXIT(INT:code)` — Requests immediate termination of the interpreter. If an integer `code` is supplied, it is used as the interpreter's process exit code; otherwise `0` is used. Execution stops immediately when `EXIT` is executed (no further statements run), and an entry is recorded in the state log to make deterministic replay possible. Using `EXIT` inside a function terminates the entire program (not just the function).
 - `INT(STR: x):INT` ; `STR` -> `INT` using empty/01/other rules; `INT` passthrough
 - `STR(INT: x):STR` ; `INT` -> binary-spelled `STR`; `STR` passthrough

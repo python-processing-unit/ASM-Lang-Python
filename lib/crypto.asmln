@@ -1,0 +1,50 @@
+# Crypto helpers (requires ext/crypto.py).
+#
+# Operators are available under the crypto.* prefix. The wrappers below provide
+# hex-friendly helpers that convert to/from TNS byte arrays.
+
+FUNC HEX_TO_BYTES(STR: hex):TNS{
+    RETURN(crypto.CRYPTO_HEX_TO_BYTES(hex))
+}
+
+FUNC BYTES_TO_HEX(TNS: bytes):STR{
+    RETURN(crypto.CRYPTO_BYTES_TO_HEX(bytes))
+}
+
+FUNC AES_GCM_ENCRYPT_HEX(STR: key_hex, STR: iv_hex, STR: plaintext_hex, STR: aad_hex=""):STR{
+    TNS: key = crypto.CRYPTO_HEX_TO_BYTES(key_hex)
+    TNS: iv = crypto.CRYPTO_HEX_TO_BYTES(iv_hex)
+    TNS: pt = crypto.CRYPTO_HEX_TO_BYTES(plaintext_hex)
+    INT: aad_len = SLEN(aad_hex)
+    IF(EQ(aad_len, 0)){
+        RETURN(crypto.CRYPTO_BYTES_TO_HEX(crypto.AES_GCM_ENCRYPT(key, iv, pt)))
+    }
+    TNS: aad = crypto.CRYPTO_HEX_TO_BYTES(aad_hex)
+    RETURN(crypto.CRYPTO_BYTES_TO_HEX(crypto.AES_GCM_ENCRYPT(key, iv, pt, aad)))
+}
+
+FUNC AES_GCM_DECRYPT_HEX(STR: key_hex, STR: iv_hex, STR: ciphertext_hex, STR: aad_hex=""):STR{
+    TNS: key = crypto.CRYPTO_HEX_TO_BYTES(key_hex)
+    TNS: iv = crypto.CRYPTO_HEX_TO_BYTES(iv_hex)
+    TNS: ct = crypto.CRYPTO_HEX_TO_BYTES(ciphertext_hex)
+    INT: aad_len = SLEN(aad_hex)
+    IF(EQ(aad_len, 0)){
+        RETURN(crypto.CRYPTO_BYTES_TO_HEX(crypto.AES_GCM_DECRYPT(key, iv, ct)))
+    }
+    TNS: aad = crypto.CRYPTO_HEX_TO_BYTES(aad_hex)
+    RETURN(crypto.CRYPTO_BYTES_TO_HEX(crypto.AES_GCM_DECRYPT(key, iv, ct, aad)))
+}
+
+FUNC AES_CBC_ENCRYPT_HEX(STR: key_hex, STR: iv_hex, STR: plaintext_hex, INT: pad=1):STR{
+    TNS: key = crypto.CRYPTO_HEX_TO_BYTES(key_hex)
+    TNS: iv = crypto.CRYPTO_HEX_TO_BYTES(iv_hex)
+    TNS: pt = crypto.CRYPTO_HEX_TO_BYTES(plaintext_hex)
+    RETURN(crypto.CRYPTO_BYTES_TO_HEX(crypto.AES_CBC_ENCRYPT(key, iv, pt, pad)))
+}
+
+FUNC AES_CBC_DECRYPT_HEX(STR: key_hex, STR: iv_hex, STR: ciphertext_hex, INT: pad=1):STR{
+    TNS: key = crypto.CRYPTO_HEX_TO_BYTES(key_hex)
+    TNS: iv = crypto.CRYPTO_HEX_TO_BYTES(iv_hex)
+    TNS: ct = crypto.CRYPTO_HEX_TO_BYTES(ciphertext_hex)
+    RETURN(crypto.CRYPTO_BYTES_TO_HEX(crypto.AES_CBC_DECRYPT(key, iv, ct, pad)))
+}

@@ -1,0 +1,49 @@
+IMPORT(crypto)
+
+FUNC RUN_TESTS():INT{
+    PRINT("Running crypto + GC tests...")
+
+    # AES-GCM (NIST SP 800-38D, Example 1)
+    STR: gcm_key = "00000000000000000000000000000000"
+    STR: gcm_iv = "000000000000000000000000"
+    STR: gcm_pt = "00000000000000000000000000000000"
+    STR: gcm_expected = "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf"
+    STR: gcm_ct = crypto.AES_GCM_ENCRYPT_HEX(gcm_key, gcm_iv, gcm_pt)
+    ASSERT(EQ(gcm_ct, gcm_expected))
+    STR: gcm_dec = crypto.AES_GCM_DECRYPT_HEX(gcm_key, gcm_iv, gcm_ct)
+    ASSERT(EQ(gcm_dec, gcm_pt))
+    PRINT("AES-GCM tests passed.")
+
+    # AES-CBC (NIST SP 800-38A, F.2.1)
+    STR: cbc_key = "2b7e151628aed2a6abf7158809cf4f3c"
+    STR: cbc_iv = "000102030405060708090a0b0c0d0e0f"
+    STR: cbc_pt = "6bc1bee22e409f96e93d7e117393172a"
+    STR: cbc_expected = "7649abac8119b246cee98e9b12e9197d"
+    STR: cbc_ct = crypto.AES_CBC_ENCRYPT_HEX(cbc_key, cbc_iv, cbc_pt, 0)
+    ASSERT(EQ(cbc_ct, cbc_expected))
+    STR: cbc_dec = crypto.AES_CBC_DECRYPT_HEX(cbc_key, cbc_iv, cbc_ct, 0)
+    ASSERT(EQ(cbc_dec, cbc_pt))
+    PRINT("AES-CBC tests passed.")
+
+    # RSA round-trip (OAEP/SHA-256)
+    TNS: keys = crypto.RSA_KEYGEN(10000000000)
+    STR: pub = keys[1]
+    STR: priv = keys[10]
+    TNS: msg = crypto.HEX_TO_BYTES("48656c6c6f")
+    TNS: enc = crypto.RSA_ENCRYPT(pub, msg)
+    TNS: dec = crypto.RSA_DECRYPT(priv, enc)
+    STR: dec_hex = crypto.BYTES_TO_HEX(dec)
+    ASSERT(EQ(dec_hex, "48656c6c6f"))
+    PRINT("RSA tests passed.")
+
+    # Random bytes + GC sanity checks
+    TNS: rnd = crypto.CRYPTO_RANDOM(10000)
+    ASSERT(EQ(TLEN(rnd, 1), 10000))
+    INT: gc_count = GC()
+    ASSERT(GTE(gc_count, 0))
+    PRINT("GC tests passed.")
+
+    RETURN(0)
+}
+
+RUN_TESTS()

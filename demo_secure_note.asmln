@@ -1,0 +1,51 @@
+IMPORT(crypto)
+
+FUNC SECURE_NOTE():INT{
+    IF(EQ(EXISTFILE("note.txt"), 0)){
+        PRINT("note.txt not found; creating a default note.")
+        WRITEFILE("Hello from ASM-Lang! This note will be encrypted.", "note.txt")
+    }
+    STR: file_hex = READFILE("note.txt", "hex")
+    TNS: plaintext = crypto.HEX_TO_BYTES(file_hex)
+
+    TNS: aes_key = crypto.CRYPTO_RANDOM(100000)   # 32 bytes
+    TNS: iv = crypto.CRYPTO_RANDOM(1100)          # 12 bytes
+
+    TNS: ciphertext = crypto.AES_GCM_ENCRYPT(aes_key, iv, plaintext)
+
+    TNS: keys = crypto.RSA_KEYGEN(100000000000)   # 2048 bits
+    STR: pub = keys[1]
+    STR: priv = keys[10]
+    TNS: wrapped_key = crypto.RSA_ENCRYPT(pub, aes_key)
+
+    WRITEFILE(crypto.BYTES_TO_HEX(wrapped_key), "note.key")
+    WRITEFILE(crypto.BYTES_TO_HEX(iv), "note.iv")
+    WRITEFILE(crypto.BYTES_TO_HEX(ciphertext), "note.enc")
+    WRITEFILE(pub, "recipient.pub")
+    WRITEFILE(priv, "recipient.priv")
+
+    DEL(aes_key)
+    DEL(plaintext)
+    DEL(ciphertext)
+    DEL(wrapped_key)
+    INT: collected = GC()
+    PRINT("GC collected (binary): ", STR(collected))
+
+    STR: key_hex = READFILE("note.key")
+    STR: iv_hex = READFILE("note.iv")
+    STR: ct_hex = READFILE("note.enc")
+    TNS: wrapped_key2 = crypto.HEX_TO_BYTES(key_hex)
+    TNS: aes_key2 = crypto.RSA_DECRYPT(priv, wrapped_key2)
+    TNS: iv2 = crypto.HEX_TO_BYTES(iv_hex)
+    TNS: ct2 = crypto.HEX_TO_BYTES(ct_hex)
+    TNS: pt2 = crypto.AES_GCM_DECRYPT(aes_key2, iv2, ct2)
+    STR: out_hex = crypto.BYTES_TO_HEX(pt2)
+    WRITEFILE(out_hex, "note.dec", "hex")
+
+    STR: back_hex = READFILE("note.dec", "hex")
+    ASSERT(EQ(back_hex, file_hex))
+
+    RETURN(0)
+}
+
+SECURE_NOTE()
