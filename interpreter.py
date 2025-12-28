@@ -57,6 +57,18 @@ WINDOWS_COMMAND_LENGTH_LIMIT = 8000
 class Tensor:
     shape: List[int]
     data: NDArray[Any]
+    strides: Tuple[int, ...] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Cache row-major strides for fast flat indexing.
+        # For shape [d0, d1, ..., dn-1], strides are
+        # [d1*d2*...*dn-1, d2*...*dn-1, ..., 1].
+        stride = 1
+        out: List[int] = [0] * len(self.shape)
+        for i in range(len(self.shape) - 1, -1, -1):
+            out[i] = stride
+            stride *= int(self.shape[i])
+        object.__setattr__(self, "strides", tuple(out))
 
 
 @dataclass
@@ -166,6 +178,12 @@ class Environment:
             return env.values[name]
         raise ASMRuntimeError(f"Undefined identifier '{name}'", rewrite_rule="IDENT")
 
+    def get_optional(self, name: str) -> Optional[Value]:
+        env = self._find_env(name)
+        if env is not None:
+            return env.values[name]
+        return None
+
     def delete(self, name: str) -> None:
         env = self._find_env(name)
         if env is not None:
@@ -265,7 +283,10 @@ class StateLogger:
         rewrite_record: Optional[Dict[str, Any]] = None,
         env_snapshot: Optional[Dict[str, int]] = None,
     ) -> StateEntry:
-        rewrite = dict(rewrite_record or {})
+        # Hot-path: reuse the caller-provided dict rather than copying.
+        # The interpreter constructs a fresh dict per step in _log_step, so
+        # sharing is safe and avoids one allocation per step.
+        rewrite = {} if rewrite_record is None else rewrite_record
         if "from_state_id" not in rewrite:
             rewrite["from_state_id"] = self.last_state_id
         step_index = self.next_state_index
@@ -411,6 +432,7 @@ class Builtins:
         self._register_custom("TMUL", 2, 2, self._tmul)
         self._register_custom("TDIV", 2, 2, self._tdiv)
         self._register_custom("TPOW", 2, 2, self._tpow)
+        self._register_custom("CONVOLVE", 2, 2, self._convolve)
         self._register_custom("FLIP", 1, 1, self._flip)
         self._register_custom("TFLIP", 2, 2, self._tflip)
 
@@ -1234,6 +1256,7 @@ class Builtins:
         env: Environment,
         location: SourceLocation,
     ) -> Value:
+        pre_function_keys = set(interpreter.functions.keys())
         # Accept either IMPORT(module) or IMPORT(module, alias)
         if len(arg_nodes) not in (1, 2) or not isinstance(arg_nodes[0], Identifier):
             raise ASMRuntimeError("IMPORT expects module name identifier", location=location, rewrite_rule="IMPORT")
@@ -1274,6 +1297,9 @@ class Builtins:
             for k, v in cached_env.values.items():
                 dotted = f"{export_prefix}.{k}"
                 env.set(dotted, v, declared_type=v.type)
+
+            if set(interpreter.functions.keys()) != pre_function_keys:
+                interpreter._mark_functions_changed()
             return Value(TYPE_INT, 0)
 
         base_dir = os.getcwd() if location.file == "<string>" else os.path.dirname(os.path.abspath(location.file))
@@ -1436,6 +1462,9 @@ class Builtins:
         # Store module env and functions into the interpreter cache for reuse
         interpreter.module_cache[module_name] = module_env
         interpreter.module_functions[module_name] = registered_functions
+
+        if set(interpreter.functions.keys()) != pre_function_keys:
+            interpreter._mark_functions_changed()
 
         # Export top-level bindings from the module under the dotted namespace
         for k, v in module_env.values.items():
@@ -1933,14 +1962,13 @@ class Builtins:
     def _map_tensor_int_binary(self, x: Tensor, y: Tensor, rule: str, location: SourceLocation, op: Callable[[int, int], int]) -> Tensor:
         if x.shape != y.shape:
             raise ASMRuntimeError(f"{rule} requires tensors with identical shapes", location=location, rewrite_rule=rule)
-        data = np.array(
-            [
-                Value(TYPE_INT, op(self._expect_int(a, rule, location), self._expect_int(b, rule, location)))
-                for a, b in zip(x.data.flat, y.data.flat)
-            ],
-            dtype=object,
-        )
-        return Tensor(shape=list(x.shape), data=data)
+        out = np.empty(x.data.size, dtype=object)
+        i = 0
+        expect_int = self._expect_int
+        for a, b in zip(x.data.flat, y.data.flat):
+            out[i] = Value(TYPE_INT, op(expect_int(a, rule, location), expect_int(b, rule, location)))
+            i += 1
+        return Tensor(shape=list(x.shape), data=out)
 
     def _map_tensor_numeric_binary(
         self,
@@ -1956,35 +1984,35 @@ class Builtins:
         if x.data.size == 0:
             # Shapes are validated elsewhere to be positive, but keep safe.
             return Tensor(shape=list(x.shape), data=np.array([], dtype=object))
-        first_type = next(iter(x.data.flat)).type
+        first_type = x.data.flat[0].type
         if first_type not in (TYPE_INT, TYPE_FLT):
             raise ASMRuntimeError(f"{rule} expects INT or FLT tensor elements", location=location, rewrite_rule=rule)
         if any(v.type != first_type for v in x.data.flat) or any(v.type != first_type for v in y.data.flat):
             raise ASMRuntimeError(f"{rule} cannot mix INT and FLT", location=location, rewrite_rule=rule)
         if first_type == TYPE_INT:
-            data = np.array(
-                [
-                    Value(TYPE_INT, op_int(self._expect_int(a, rule, location), self._expect_int(b, rule, location)))
-                    for a, b in zip(x.data.flat, y.data.flat)
-                ],
-                dtype=object,
-            )
-            return Tensor(shape=list(x.shape), data=data)
-        data = np.array(
-            [
-                Value(TYPE_FLT, op_flt(float(a.value), float(b.value)))
-                for a, b in zip(x.data.flat, y.data.flat)
-            ],
-            dtype=object,
-        )
-        return Tensor(shape=list(x.shape), data=data)
+            out = np.empty(x.data.size, dtype=object)
+            i = 0
+            expect_int = self._expect_int
+            for a, b in zip(x.data.flat, y.data.flat):
+                out[i] = Value(TYPE_INT, op_int(expect_int(a, rule, location), expect_int(b, rule, location)))
+                i += 1
+            return Tensor(shape=list(x.shape), data=out)
+
+        out = np.empty(x.data.size, dtype=object)
+        i = 0
+        for a, b in zip(x.data.flat, y.data.flat):
+            out[i] = Value(TYPE_FLT, op_flt(float(a.value), float(b.value)))
+            i += 1
+        return Tensor(shape=list(x.shape), data=out)
 
     def _map_tensor_int_scalar(self, tensor: Tensor, scalar: int, rule: str, location: SourceLocation, op: Callable[[int, int], int]) -> Tensor:
-        data = np.array(
-            [Value(TYPE_INT, op(self._expect_int(entry, rule, location), scalar)) for entry in tensor.data.flat],
-            dtype=object,
-        )
-        return Tensor(shape=list(tensor.shape), data=data)
+        out = np.empty(tensor.data.size, dtype=object)
+        i = 0
+        expect_int = self._expect_int
+        for entry in tensor.data.flat:
+            out[i] = Value(TYPE_INT, op(expect_int(entry, rule, location), scalar))
+            i += 1
+        return Tensor(shape=list(tensor.shape), data=out)
 
     def _map_tensor_numeric_scalar(
         self,
@@ -1997,7 +2025,7 @@ class Builtins:
     ) -> Tensor:
         if tensor.data.size == 0:
             return Tensor(shape=list(tensor.shape), data=np.array([], dtype=object))
-        first_type = next(iter(tensor.data.flat)).type
+        first_type = tensor.data.flat[0].type
         if first_type not in (TYPE_INT, TYPE_FLT):
             raise ASMRuntimeError(f"{rule} expects INT or FLT tensor elements", location=location, rewrite_rule=rule)
         if scalar.type != first_type:
@@ -2006,17 +2034,20 @@ class Builtins:
             raise ASMRuntimeError(f"{rule} tensor has mixed element types", location=location, rewrite_rule=rule)
         if first_type == TYPE_INT:
             sc = self._expect_int(scalar, rule, location)
-            data = np.array(
-                [Value(TYPE_INT, op_int(self._expect_int(entry, rule, location), sc)) for entry in tensor.data.flat],
-                dtype=object,
-            )
-            return Tensor(shape=list(tensor.shape), data=data)
+            out = np.empty(tensor.data.size, dtype=object)
+            i = 0
+            expect_int = self._expect_int
+            for entry in tensor.data.flat:
+                out[i] = Value(TYPE_INT, op_int(expect_int(entry, rule, location), sc))
+                i += 1
+            return Tensor(shape=list(tensor.shape), data=out)
         scf = float(scalar.value)
-        data = np.array(
-            [Value(TYPE_FLT, op_flt(float(entry.value), scf)) for entry in tensor.data.flat],
-            dtype=object,
-        )
-        return Tensor(shape=list(tensor.shape), data=data)
+        out = np.empty(tensor.data.size, dtype=object)
+        i = 0
+        for entry in tensor.data.flat:
+            out[i] = Value(TYPE_FLT, op_flt(float(entry.value), scf))
+            i += 1
+        return Tensor(shape=list(tensor.shape), data=out)
 
     def _ensure_tensor_ints(self, tensor: Tensor, rule: str, location: SourceLocation) -> None:
         for entry in tensor.data.flat:
@@ -2061,10 +2092,9 @@ class Builtins:
         fill_value = args[1]
         if any(entry.type != fill_value.type for entry in tensor.data.flat):
             raise ASMRuntimeError("FILL value type must match existing tensor element types", location=location, rewrite_rule="FILL")
-        new_data = np.array(
-            [Value(fill_value.type, fill_value.value) for _ in range(tensor.data.size)],
-            dtype=object,
-        )
+        new_data = np.empty(tensor.data.size, dtype=object)
+        for i in range(tensor.data.size):
+            new_data[i] = Value(fill_value.type, fill_value.value)
         return Value(TYPE_TNS, Tensor(shape=list(tensor.shape), data=new_data))
 
     def _tns(
@@ -2281,8 +2311,152 @@ class Builtins:
         # reshape the flat data into the tensor shape, flip along axis, then flatten
         reshaped = tensor.data.reshape(tuple(tensor.shape))
         flipped = np.flip(reshaped, axis=axis)
-        new_data = np.array(list(flipped.flat), dtype=object)
+        # ravel().copy() avoids constructing a Python list and preserves order.
+        new_data = flipped.ravel().copy()
         return Value(TYPE_TNS, Tensor(shape=list(tensor.shape), data=new_data))
+
+    def _convolve(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        """CONVOLVE(TNS: x, TNS: kernel):TNS
+
+        N-dimensional discrete convolution with clamped (replicate) boundary.
+
+        - `x` and `kernel` must have the same rank.
+        - Each `kernel` dimension length must be odd (so it has a well-defined center).
+        - Tensor elements must be uniformly INT or uniformly FLT within each tensor.
+        - If both tensors are INT -> output elements are INT.
+          Otherwise output elements are FLT (INT/FLT mixing is allowed and produces FLT).
+
+        The output shape equals the input `x` shape.
+        """
+
+        x = self._expect_tns(args[0], "CONVOLVE", location)
+        kernel = self._expect_tns(args[1], "CONVOLVE", location)
+
+        if len(x.shape) != len(kernel.shape):
+            raise ASMRuntimeError(
+                "CONVOLVE requires input and kernel tensors with the same rank",
+                location=location,
+                rewrite_rule="CONVOLVE",
+            )
+        if any((d % 2) == 0 for d in kernel.shape):
+            raise ASMRuntimeError(
+                "CONVOLVE requires odd kernel dimensions",
+                location=location,
+                rewrite_rule="CONVOLVE",
+            )
+
+        def _uniform_numeric_type(t: Tensor, which: str) -> str:
+            if t.data.size == 0:
+                raise ASMRuntimeError(
+                    f"CONVOLVE does not support empty {which} tensors",
+                    location=location,
+                    rewrite_rule="CONVOLVE",
+                )
+            first = next(iter(t.data.flat)).type
+            if first not in (TYPE_INT, TYPE_FLT):
+                raise ASMRuntimeError(
+                    "CONVOLVE expects INT or FLT tensor elements",
+                    location=location,
+                    rewrite_rule="CONVOLVE",
+                )
+            if any(v.type != first for v in t.data.flat):
+                raise ASMRuntimeError(
+                    "CONVOLVE does not allow mixed element types within a tensor",
+                    location=location,
+                    rewrite_rule="CONVOLVE",
+                )
+            return first
+
+        x_type = _uniform_numeric_type(x, "input")
+        k_type = _uniform_numeric_type(kernel, "kernel")
+        out_type = TYPE_INT if (x_type == TYPE_INT and k_type == TYPE_INT) else TYPE_FLT
+
+        rank = len(x.shape)
+        centers = [d // 2 for d in kernel.shape]  # 0-based
+
+        # Fast path: use NumPy padding + sliding windows + vectorized multiply/sum.
+        # This keeps exact boundary semantics (replicate) and true convolution (kernel flipped).
+        try:
+            sliding_window_view = np.lib.stride_tricks.sliding_window_view  # type: ignore[attr-defined]
+
+            if out_type == TYPE_INT:
+                x_int = np.fromiter((int(v.value) for v in x.data.flat), dtype=object, count=x.data.size).reshape(tuple(x.shape))
+                k_int = np.fromiter((int(v.value) for v in kernel.data.flat), dtype=object, count=kernel.data.size).reshape(tuple(kernel.shape))
+                k_flip = np.flip(k_int, axis=tuple(range(rank)))
+                pad_width = [(c, c) for c in centers]
+                padded = np.pad(x_int, pad_width=pad_width, mode="edge")
+                windows = sliding_window_view(padded, tuple(kernel.shape))
+                acc = (windows * k_flip).sum(axis=tuple(range(-rank, 0)))
+                out = np.empty(x.data.size, dtype=object)
+                i = 0
+                for val in acc.flat:
+                    out[i] = Value(TYPE_INT, val)
+                    i += 1
+                return Value(TYPE_TNS, Tensor(shape=list(x.shape), data=out))
+
+            # FLT output: allow INT/FLT mixing by converting to float.
+            def _as_float(v: Value) -> float:
+                return float(v.value) if v.type == TYPE_FLT else float(int(v.value))
+
+            x_flt = np.fromiter((_as_float(v) for v in x.data.flat), dtype=float, count=x.data.size).reshape(tuple(x.shape))
+            k_flt = np.fromiter((_as_float(v) for v in kernel.data.flat), dtype=float, count=kernel.data.size).reshape(tuple(kernel.shape))
+            k_flip = np.flip(k_flt, axis=tuple(range(rank)))
+            pad_width = [(c, c) for c in centers]
+            padded = np.pad(x_flt, pad_width=pad_width, mode="edge")
+            windows = sliding_window_view(padded, tuple(kernel.shape))
+            acc = (windows * k_flip).sum(axis=tuple(range(-rank, 0)))
+            out = np.empty(x.data.size, dtype=object)
+            i = 0
+            for val in acc.flat:
+                out[i] = Value(TYPE_FLT, float(val))
+                i += 1
+            return Value(TYPE_TNS, Tensor(shape=list(x.shape), data=out))
+
+        except Exception:
+            # Fallback to the reference implementation if sliding window view
+            # isn't available or if NumPy raises in an edge case.
+            x_arr = x.data.reshape(tuple(x.shape))
+            k_arr = kernel.data.reshape(tuple(kernel.shape))
+            out = np.empty(x.data.size, dtype=object)
+            out_i = 0
+            for out_pos in np.ndindex(*x.shape):
+                acc_int = 0
+                acc_flt = 0.0
+                for k_pos in np.ndindex(*kernel.shape):
+                    # Map kernel position to input position centered at out_pos.
+                    in_pos: List[int] = []
+                    for axis in range(rank):
+                        offset = k_pos[axis] - centers[axis]
+                        coord = out_pos[axis] + offset
+                        if coord < 0:
+                            coord = 0
+                        elif coord >= x.shape[axis]:
+                            coord = x.shape[axis] - 1
+                        in_pos.append(coord)
+
+                    # True convolution flips the kernel along every axis.
+                    k_flip = tuple(kernel.shape[axis] - 1 - k_pos[axis] for axis in range(rank))
+                    xv: Value = x_arr[tuple(in_pos)]
+                    kv: Value = k_arr[k_flip]
+
+                    if out_type == TYPE_INT:
+                        acc_int += int(xv.value) * int(kv.value)
+                    else:
+                        ax = float(xv.value) if xv.type == TYPE_FLT else float(int(xv.value))
+                        ak = float(kv.value) if kv.type == TYPE_FLT else float(int(kv.value))
+                        acc_flt += ax * ak
+
+                out[out_i] = Value(out_type, acc_int if out_type == TYPE_INT else acc_flt)
+                out_i += 1
+
+            return Value(TYPE_TNS, Tensor(shape=list(x.shape), data=out))
 
     def _cl(
         self,
@@ -2423,6 +2597,7 @@ class Interpreter:
         output_sink: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.source = source
+        self._source_lines = source.splitlines()
         normalized_filename = filename if filename == "<string>" else os.path.abspath(filename)
         self.filename = normalized_filename
         self.entry_filename = normalized_filename
@@ -2530,6 +2705,37 @@ class Interpreter:
         # re-registered if necessary without re-running module code.
         self.module_functions: Dict[str, List[Function]] = {}
 
+        # Cache for resolving unqualified function calls inside module frames.
+        # Keyed by (frame_name, callee_name, functions_version).
+        self._functions_version: int = 0
+        self._call_resolution_cache: Dict[Tuple[str, str, int], Optional[str]] = {}
+
+    def _mark_functions_changed(self) -> None:
+        self._functions_version += 1
+        self._call_resolution_cache.clear()
+
+    def _resolve_user_function_name(self, *, frame_name: str, callee: str) -> Optional[str]:
+        version = self._functions_version
+        key = (frame_name, callee, version)
+        cached = self._call_resolution_cache.get(key, None)
+        # We cache positive and negative results; distinguish missing key from cached None
+        if key in self._call_resolution_cache:
+            return cached
+
+        resolved: Optional[str] = None
+        if callee in self.functions:
+            resolved = callee
+        else:
+            dot = frame_name.find(".")
+            if dot != -1:
+                module_prefix = frame_name[:dot]
+                candidate = f"{module_prefix}.{callee}"
+                if candidate in self.functions:
+                    resolved = candidate
+
+        self._call_resolution_cache[key] = resolved
+        return resolved
+
     # Convenience wrappers so extensions can call interpreter._expect_*
     # directly. Delegate to the builtins helpers which implement the
     # concrete checks and error reporting.
@@ -2547,7 +2753,7 @@ class Interpreter:
     def parse(self) -> Program:
         lexer = Lexer(self.source, self.filename)
         tokens = lexer.tokenize()
-        parser = Parser(tokens, self.filename, self.source.splitlines(), type_names=self.type_registry.names())
+        parser = Parser(tokens, self.filename, self._source_lines, type_names=self.type_registry.names())
         return parser.parse()
 
     def run(self) -> None:
@@ -2585,14 +2791,19 @@ class Interpreter:
 
     def _execute_block(self, statements: List[Statement], env: Environment) -> None:
         i = 0
+        emit_event = self._emit_event
+        log_step = self._log_step
+        eval_expr = self._evaluate_expression
+        execute_stmt = self._execute_statement
+
         frame: Frame = self.call_stack[-1]
         gotopoints: Dict[int, int] = frame.gotopoints
         while i < len(statements):
             statement = statements[i]
-            self._emit_event("before_statement", self, statement, env)
+            emit_event("before_statement", self, statement, env)
             if isinstance(statement, GotopointStatement):
-                self._log_step(rule=statement.__class__.__name__, location=statement.location)
-                gid = self._evaluate_expression(statement.expression, env)
+                log_step(rule=statement.__class__.__name__, location=statement.location)
+                gid = eval_expr(statement.expression, env)
                 if gid.type == TYPE_INT:
                     if gid.value < 0:
                         raise ASMRuntimeError(
@@ -2611,10 +2822,10 @@ class Interpreter:
                     )
                 gotopoints[key] = i
                 i += 1
-                self._emit_event("after_statement", self, statement, env)
+                emit_event("after_statement", self, statement, env)
                 continue
             try:
-                self._execute_statement(statement, env)
+                execute_stmt(statement, env)
             except JumpSignal as js:
                 target = js.target
                 key = (target.type, target.value)
@@ -2623,9 +2834,9 @@ class Interpreter:
                         f"GOTO to undefined gotopoint '{target.value}'", location=statement.location, rewrite_rule="GOTO"
                     )
                 i = gotopoints[key]
-                self._emit_event("after_statement", self, statement, env)
+                emit_event("after_statement", self, statement, env)
                 continue
-            self._emit_event("after_statement", self, statement, env)
+            emit_event("after_statement", self, statement, env)
             i += 1
 
     def _execute_statement(self, statement: Statement, env: Environment) -> None:
@@ -2664,7 +2875,12 @@ class Interpreter:
                     rewrite_rule="ASSIGN",
                 )
             assert isinstance(base_val.value, Tensor)
-            indices = [self._expect_int(self._evaluate_expression(node, env), "ASSIGN", statement.location) for node in index_nodes]
+            eval_expr = self._evaluate_expression
+            expect_int = self._expect_int
+            indices: List[int] = []
+            indices_append = indices.append
+            for node in index_nodes:
+                indices_append(expect_int(eval_expr(node, env), "ASSIGN", statement.location))
             new_value = self._evaluate_expression(statement.value, env)
             self._mutate_tensor_value(base_val.value, indices, new_value, statement.location)
             return
@@ -2685,6 +2901,8 @@ class Interpreter:
                 raise ASMRuntimeError(
                     f"Function name '{statement.name}' conflicts with built-in", location=statement.location
                 )
+            # Function table mutation invalidates call resolution caches.
+            self._mark_functions_changed()
             self.functions[statement.name] = Function(
                 name=statement.name,
                 params=statement.params,
@@ -2760,18 +2978,22 @@ class Interpreter:
         raise ASMRuntimeError("Unsupported statement", location=statement.location)
 
     def _execute_if(self, statement: IfStatement, env: Environment) -> None:
-        if self._condition_int(self._evaluate_expression(statement.condition, env), statement.location) != 0:
+        eval_expr = self._evaluate_expression
+        cond_int = self._condition_int
+        if cond_int(eval_expr(statement.condition, env), statement.location) != 0:
             self._execute_block(statement.then_block.statements, env)
             return
         for branch in statement.elifs:
-            if self._condition_int(self._evaluate_expression(branch.condition, env), branch.condition.location) != 0:
+            if cond_int(eval_expr(branch.condition, env), branch.condition.location) != 0:
                 self._execute_block(branch.block.statements, env)
                 return
         if statement.else_block:
             self._execute_block(statement.else_block.statements, env)
 
     def _execute_while(self, statement: WhileStatement, env: Environment) -> None:
-        while self._condition_int(self._evaluate_expression(statement.condition, env), statement.condition.location) != 0:
+        eval_expr = self._evaluate_expression
+        cond_int = self._condition_int
+        while cond_int(eval_expr(statement.condition, env), statement.condition.location) != 0:
             try:
                 self._execute_block(statement.block.statements, env)
             except BreakSignal as bs:
@@ -2782,8 +3004,8 @@ class Interpreter:
             except ContinueSignal:
                 # Evaluate condition now to determine if there will be another iteration.
                 try:
-                    next_cond_val = self._evaluate_expression(statement.condition, env)
-                    next_cond = self._condition_int(next_cond_val, statement.condition.location)
+                    next_cond_val = eval_expr(statement.condition, env)
+                    next_cond = cond_int(next_cond_val, statement.condition.location)
                 except ASMRuntimeError:
                     # Propagate evaluation errors
                     raise
@@ -2794,7 +3016,8 @@ class Interpreter:
                 return
 
     def _execute_for(self, statement: ForStatement, env: Environment) -> None:
-        target_val = self._evaluate_expression(statement.target_expr, env)
+        eval_expr = self._evaluate_expression
+        target_val = eval_expr(statement.target_expr, env)
         target = self._expect_int(target_val, "FOR", statement.location)
         # FOR loops use 1-indexed counters (language-level). Initialize
         # counter to 1 and iterate while counter <= target so library code
@@ -2819,6 +3042,21 @@ class Interpreter:
             env.set(statement.counter, Value(TYPE_INT, self._expect_int(env.get(statement.counter), "FOR", statement.location) + 1))
 
     def _condition_int(self, value: Value, location: Optional[SourceLocation]) -> int:
+        # Fast-path the built-in scalar types; this avoids repeated registry
+        # lookups and TypeContext allocations on tight control-flow loops.
+        # Extension-defined types still go through the registry.
+        vtype = value.type
+        if vtype == TYPE_INT:
+            return 0 if int(value.value) == 0 else 1
+        if vtype == TYPE_FLT:
+            return 0 if float(value.value) == 0.0 else 1
+        if vtype == TYPE_STR:
+            text = str(value.value)
+            if text == "":
+                return 0
+            if set(text).issubset({"0", "1"}):
+                return int(text, 2)
+            return 1
         spec = self.type_registry.get_optional(value.type)
         if spec is None:
             raise ASMRuntimeError("Unsupported type in condition", location=location)
@@ -2837,8 +3075,9 @@ class Interpreter:
         return size
 
     def _tensor_truthy(self, tensor: Tensor) -> bool:
+        cond_int = self._condition_int
         for item in tensor.data.flat:
-            if self._condition_int(item, None) != 0:
+            if cond_int(item, None) != 0:
                 return True
         return False
 
@@ -2849,6 +3088,10 @@ class Interpreter:
             assert isinstance(left.value, Tensor)
             assert isinstance(right.value, Tensor)
             return self._tensor_equal(left.value, right.value)
+        # Fast-path the built-in scalar types.
+        if left.type in (TYPE_INT, TYPE_FLT, TYPE_STR):
+            return left.value == right.value
+
         spec = self.type_registry.get_optional(left.type)
         if spec is not None and spec.equals is not None:
             ctx = TypeContext(interpreter=self, location=None)
@@ -2871,8 +3114,10 @@ class Interpreter:
         if len(indices) != len(tensor.shape):
             raise ASMRuntimeError("Incorrect number of tensor indices", location=location, rewrite_rule=rule)
         offset = 0
-        stride = 1
-        for dim_len, raw in zip(reversed(tensor.shape), reversed(indices)):
+        shape = tensor.shape
+        strides = tensor.strides
+        for i, raw in enumerate(indices):
+            dim_len = shape[i]
             idx = raw
             if idx == 0:
                 raise ASMRuntimeError("Tensor indices are 1-indexed", location=location, rewrite_rule=rule)
@@ -2880,9 +3125,8 @@ class Interpreter:
                 idx = dim_len + idx + 1
             if idx <= 0 or idx > dim_len:
                 raise ASMRuntimeError("Tensor index out of range", location=location, rewrite_rule=rule)
-            offset += (idx - 1) * stride
-            stride *= dim_len
-        return offset
+            offset += (idx - 1) * strides[i]
+        return int(offset)
 
     def _make_tensor_from_shape(self, shape: List[int], fill_value: Value, rule: str, location: SourceLocation) -> Tensor:
         self._validate_tensor_shape(shape, rule, location)
@@ -2926,7 +3170,9 @@ class Interpreter:
                     subshape = nested.shape
                 elif subshape != nested.shape:
                     raise ASMRuntimeError("Inconsistent tensor shape", location=item.location, rewrite_rule="TNS")
-                flat.extend(list(nested.data.flat))
+                # numpy.flat already iterates the elements; avoid constructing
+                # an intermediate list.
+                flat.extend(nested.data.flat)
             else:
                 val = self._evaluate_expression(item, env)
                 if subshape is None:
@@ -2942,12 +3188,20 @@ class Interpreter:
         return Tensor(shape=shape, data=np.array(flat, dtype=object))
 
     def _gather_index_chain(self, expr: Expression) -> Tuple[Expression, List[Expression]]:
-        indices: List[Expression] = []
-        current = expr
+        # Avoid repeated list concatenations for deep chains like a[1][2][3].
+        parts: List[List[Expression]] = []
+        current: Expression = expr
         while isinstance(current, IndexExpression):
-            indices = current.indices + indices
+            parts.append(current.indices)
             current = current.base
-        return current, indices
+        if not parts:
+            return current, []
+        # Indices are encountered from outermost suffix inward; reverse to
+        # preserve evaluation order.
+        out: List[Expression] = []
+        for chunk in reversed(parts):
+            out.extend(chunk)
+        return current, out
 
     def _evaluate_expression(self, expression: Expression, env: Environment) -> Value:
         if isinstance(expression, Literal):
@@ -2961,21 +3215,29 @@ class Interpreter:
             if base_val.type != TYPE_TNS:
                 raise ASMRuntimeError("Indexed access requires a tensor", location=expression.location, rewrite_rule="INDEX")
             assert isinstance(base_val.value, Tensor)
-            indices = [self._expect_int(self._evaluate_expression(idx, env), "INDEX", expression.location) for idx in index_nodes]
+            eval_expr = self._evaluate_expression
+            expect_int = self._expect_int
+            indices: List[int] = []
+            indices_append = indices.append
+            for idx_node in index_nodes:
+                indices_append(expect_int(eval_expr(idx_node, env), "INDEX", expression.location))
             offset = self._tensor_flat_index(base_val.value, indices, "INDEX", expression.location)
             return base_val.value.data[offset]
         if isinstance(expression, Identifier):
-            try:
-                return env.get(expression.name)
-            except ASMRuntimeError as err:
-                err.location = expression.location
-                if expression.name == "INPUT":
-                    self._emit_event("before_call", self, "INPUT", [], env, expression.location)
-                    result = self.builtins.invoke(self, "INPUT", [], [], env, expression.location)
-                    self._emit_event("after_call", self, "INPUT", result, env, expression.location)
-                    self._log_step(rule="INPUT", location=expression.location, extra={"args": [], "result": result.value})
-                    return result
-                raise
+            found = env.get_optional(expression.name)
+            if found is not None:
+                return found
+            if expression.name == "INPUT":
+                self._emit_event("before_call", self, "INPUT", [], env, expression.location)
+                result = self.builtins.invoke(self, "INPUT", [], [], env, expression.location)
+                self._emit_event("after_call", self, "INPUT", result, env, expression.location)
+                self._log_step(rule="INPUT", location=expression.location, extra={"args": [], "result": result.value})
+                return result
+            raise ASMRuntimeError(
+                f"Undefined identifier '{expression.name}'",
+                location=expression.location,
+                rewrite_rule="IDENT",
+            )
         if isinstance(expression, CallExpression):
             if expression.name == "IMPORT":
                 if any(arg.name for arg in expression.args):
@@ -3026,16 +3288,11 @@ class Interpreter:
                         )
                     keyword_args[arg.name] = value
             func_name: Optional[str] = None
-            if expression.name in self.functions:
-                func_name = expression.name
+            if self.call_stack:
+                func_name = self._resolve_user_function_name(frame_name=self.call_stack[-1].name, callee=expression.name)
             else:
-                if self.call_stack:
-                    current = self.call_stack[-1]
-                    if "." in current.name:
-                        module_prefix = current.name.split(".", 1)[0]
-                        candidate = f"{module_prefix}.{expression.name}"
-                        if candidate in self.functions:
-                            func_name = candidate
+                # Shouldn't happen in practice, but preserve behavior.
+                func_name = expression.name if expression.name in self.functions else None
             if func_name is not None:
                 self._log_step(
                     rule="CALL",

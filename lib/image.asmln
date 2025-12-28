@@ -8,10 +8,15 @@
 # SAVE_PNG(TNS: img, STR: path, INT: compression_level)
 # SAVE_JPEG(TNS: img, STR: path, INT: compression_level)
 # SAVE_BMP(TNS: img, STR: path)
+# POLYGON(TNS:img, TNS:points[[x,y]...], TNS:color[r,g,b,a], INT:fill=1, INT:thickness=1):TNS
+# RECT(TNS: img, INT: x, INT: y, INT: width, INT: height, TNS: color[r,g,b,a], INT: fill = 1, INT: thickness = 1):TNS  # wraps POLYGON
+# ELLIPSE(TNS: img, TNS: center, INT: rx, INT: ry, TNS: color[r,g,b,a], INT: fill = 1, INT: thickness = 1):TNS
+# SQUARE(TNS: img, INT: x, INT: y, INT: size, TNS: color, INT: fill, INT: thickness):TNS
+# CIRCLE(TNS: img, TNS: center, INT: radius, TNS: color, INT: fill, INT: thickness):TNS
 # WIDTH(TNS: img):INT
 # HEIGHT(TNS: img):INT
 # CHANNELS(TNS: img):INT
-# PIXEL(TNS: img, INT: x, INT: y):TNS[r,g,b,a]
+# PIXEL(TNS: img, INT: x, INT: y):TNS
 # R(TNS: img, INT: x, INT: y):INT
 # G(TNS: img, INT: x, INT: y):INT
 # B(TNS: img, INT: x, INT: y):INT
@@ -24,6 +29,7 @@
 # ROTATE(TNS: img, FLT: degrees):TNS
 # BLIT(TNS: src, TNS: dest, INT: x, INT: y, INT: mixalpha = 1):TNS
 # GRAYSCALE(TNS: img):TNS  # three-channel grayscale (rgb=luminance, alpha preserved)
+# REPLACE_COLOR(TNS: img, TNS: target_color, TNS: replacement_color):TNS
 # BLUR(TNS: img, INT: radius):TNS  # gaussian blur with integer radius
 # SHOW(TNS: img, STR: window):INT  # saves to temp file and opens with default viewer (Windows only)
 #
@@ -97,7 +103,38 @@ FUNC INVERT(TNS: img):TNS{
     DEL(a)
     POP(out)
 }
+
+FUNC RECT(TNS: img, INT: x, INT: y, INT: width, INT: height, TNS: color, INT: fill, INT: thickness):TNS{
+    TNS: pts = [ ^
+        [x, y], ^
+        [ADD(x, SUB(width, 1)), y], ^
+        [ADD(x, SUB(width, 1)), ADD(y, SUB(height, 1))], ^
+        [x, ADD(y, SUB(height, 1))], ^
+        [x, y] ^
+    ]
+    RETURN(image.POLYGON(img, pts, color, fill, thickness))
+}
+
+FUNC RECTANGLE(TNS: img, INT: x, INT: y, INT: width, INT: height, TNS: color, INT: fill, INT: thickness):TNS{
+    RETURN(RECT(img, x, y, width, height, color, fill, thickness))
+}
+
+FUNC FILL_RECT(TNS: img, INT: x, INT: y, INT: width, INT: height, TNS: color):TNS{
+    RETURN(RECT(img, x, y, width, height, color, 1, 1))
+}
+
+FUNC FILL_ELLIPSE(TNS: img, TNS: center, INT: rx, INT: ry, TNS: color):TNS{
+    RETURN(image.ELLIPSE(img, center, rx, ry, color, 1, 1))
+}
  
+FUNC SQUARE(TNS: img, INT: x, INT: y, INT: size, TNS: color, INT: fill, INT: thickness):TNS{
+    RETURN(RECT(img, x, y, size, size, color, fill, thickness))
+}
+
+FUNC CIRCLE(TNS: img, TNS: center, INT: radius, TNS: color, INT: fill, INT: thickness):TNS{
+    RETURN(image.ELLIPSE(img, center, radius, radius, color, fill, thickness))
+}
+
 FUNC SHOW(TNS: img, STR: window):INT{
     # Save the image to the provided path and open it with the system default
     # viewer on Windows. `window` is treated as the target file path.

@@ -315,7 +315,58 @@ FUNC STDLIB_TESTS():INT{
     DEL(bmp)
     DEL(blit_out)
 
-    PRINT("image library tests passed.")
+    # Shape drawing and primitive operators
+    # small canvas: 11x11x4 (binary 1011 = 11, 100 = 4 channels)
+    TNS: small = TNS([1011,1011,100], 0)
+    TNS: red = [11111111, 0, 0, 11111111]
+
+    # RECT / RECTANGLE / SQUARE / FILL_RECT
+    TNS: rect_out = image.RECT(small, 10, 10, 101, 101, red, 1, 1)
+    ASSERT(EQ(TLEN(rect_out, 1), TLEN(small, 1)))
+    ASSERT(EQ(rect_out[10,10,1], red[1]))
+    DEL(rect_out)
+
+    TNS: rect2 = image.RECTANGLE(small, 10, 10, 101, 101, red, 1, 1)
+    ASSERT(EQ(TLEN(rect2, 1), TLEN(small, 1)))
+    DEL(rect2)
+
+    TNS: sq = image.SQUARE(small, 10, 10, 101, red, 1, 1)
+    ASSERT(EQ(TLEN(sq, 1), TLEN(small, 1)))
+    DEL(sq)
+
+    TNS: filled = image.FILL_RECT(small, 10, 10, 101, 101, red)
+    ASSERT(EQ(TLEN(filled, 1), TLEN(small, 1)))
+    DEL(filled)
+
+    # ELLIPSE / FILL_ELLIPSE / CIRCLE
+    TNS: ell = image.ELLIPSE(small, [100,100], 11, 101, red, 1, 1)
+    ASSERT(EQ(TLEN(ell, 1), TLEN(small, 1)))
+    DEL(ell)
+
+    TNS: fill_ell = image.FILL_ELLIPSE(small, [100,100], 11, 101, red)
+    ASSERT(EQ(TLEN(fill_ell, 1), TLEN(small, 1)))
+    DEL(fill_ell)
+
+    TNS: circ = image.CIRCLE(small, [100,100], 11, red, 1, 1)
+    ASSERT(EQ(TLEN(circ, 1), TLEN(small, 1)))
+    DEL(circ)
+
+    # POLYGON
+    TNS: pts = [ ^
+        [10, 10], ^
+        [110, 10], ^
+        [100, 110], ^
+        [10, 10] ^
+    ]
+    TNS: poly = image.POLYGON(small, pts, red, 1, 1)
+    ASSERT(EQ(TLEN(poly, 1), TLEN(small, 1)))
+    DEL(poly)
+
+    # Cleanup small canvas
+    DEL(small)
+    DEL(red)
+
+    PRINT("Image library tests passed.")
     PRINT()
     RETURN(0)
 }

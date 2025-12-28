@@ -57,13 +57,16 @@ class Lexer:
 
     def tokenize(self) -> List[Token]:
         tokens: List[Token] = []
-        _peek = self._peek
+        tokens_append = tokens.append
         _advance = self._advance
         _is_identifier_start = self._is_identifier_start
         symbols = SYMBOLS
-        while not self._eof:
-            ch: str = _peek()
-            if ch in " \t":
+        text = self.text
+        n = len(text)
+
+        while self.index < n:
+            ch: str = text[self.index]
+            if ch == " " or ch == "\t":
                 _advance()
                 continue
             if ch == "\r":
@@ -73,37 +76,40 @@ class Lexer:
                 self._consume_line_continuation()
                 continue
             if ch == "\n":
-                tokens.append(Token("NEWLINE", "\n", self.line, self.column))
+                tokens_append(Token("NEWLINE", "\n", self.line, self.column))
                 _advance()
                 continue
             if ch == "#":
                 self._consume_comment()
                 continue
-            if ch in SYMBOLS:
-                tokens.append(Token(symbols[ch], ch, self.line, self.column))
+            if ch in symbols:
+                tokens_append(Token(symbols[ch], ch, self.line, self.column))
                 _advance()
                 continue
             if ch in ('"', "'"):
-                tokens.append(self._consume_string())
+                tokens_append(self._consume_string())
                 continue
             if ch == "-":
-                tokens.append(self._consume_signed_number())
+                tokens_append(self._consume_signed_number())
                 continue
             if ch in "01":
-                tokens.append(self._consume_unsigned_number())
+                tokens_append(self._consume_unsigned_number())
                 continue
             if _is_identifier_start(ch):
-                tokens.append(self._consume_identifier())
+                tokens_append(self._consume_identifier())
                 continue
             raise ASMParseError(
                 f"Unexpected character '{ch}' at {self.filename}:{self.line}:{self.column}"
             )
-        tokens.append(Token("EOF", "", self.line, self.column))
+        tokens_append(Token("EOF", "", self.line, self.column))
         return tokens
 
     def _consume_comment(self) -> None:
-        while not self._eof and self._peek() != "\n":
-            self._advance()
+        text = self.text
+        n = len(text)
+        _advance = self._advance
+        while self.index < n and text[self.index] != "\n":
+            _advance()
 
     def _consume_unsigned_number(self) -> Token:
         line, col = self.line, self.column
@@ -169,11 +175,14 @@ class Lexer:
 
     def _consume_binary_digits(self) -> str:
         digits: List[str] = []
-        while not self._eof:
-            ch = self._peek()
+        text = self.text
+        n = len(text)
+        _advance = self._advance
+        while self.index < n:
+            ch = text[self.index]
             if ch in "01":
                 digits.append(ch)
-                self._advance()
+                _advance()
                 continue
             if ch == "^":
                 self._consume_line_continuation()
@@ -188,11 +197,14 @@ class Lexer:
                 f"Identifiers must not start with '0' or '1' at {self.filename}:{line}:{col}"
             )
         chars: List[str] = []
-        while not self._eof:
-            ch = self._peek()
+        text = self.text
+        n = len(text)
+        _advance = self._advance
+        while self.index < n:
+            ch = text[self.index]
             if self._is_identifier_part(ch):
                 chars.append(ch)
-                self._advance()
+                _advance()
                 continue
             if ch == "^":
                 self._consume_line_continuation()

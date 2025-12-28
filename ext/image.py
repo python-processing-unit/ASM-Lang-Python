@@ -65,6 +65,45 @@ def _make_tensor_from_pixels(width: int, height: int, pixels: List[int], rule: s
     return Value(TYPE_TNS, Tensor(shape=shape, data=data))
 
 
+def _clamp_channel(v: int) -> int:
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    return v
+
+
+def _alpha_blend_pixel(
+    dest_arr: Any,
+    x: int,
+    y: int,
+    color: Tuple[int, int, int, int],
+    interpreter: Any,
+    rule: str,
+    location: Any,
+) -> None:
+    from interpreter import TYPE_INT, Value
+
+    d_r = interpreter._expect_int(dest_arr[y, x, 0], rule, location)
+    d_g = interpreter._expect_int(dest_arr[y, x, 1], rule, location)
+    d_b = interpreter._expect_int(dest_arr[y, x, 2], rule, location)
+    d_a = interpreter._expect_int(dest_arr[y, x, 3], rule, location)
+
+    r, g, b, a = color
+    sa = _clamp_channel(a)
+    inv_sa = 255 - sa
+
+    out_r = _clamp_channel((sa * r + inv_sa * d_r) // 255)
+    out_g = _clamp_channel((sa * g + inv_sa * d_g) // 255)
+    out_b = _clamp_channel((sa * b + inv_sa * d_b) // 255)
+    out_a = _clamp_channel(sa + (d_a * inv_sa) // 255)
+
+    dest_arr[y, x, 0] = Value(TYPE_INT, int(out_r))
+    dest_arr[y, x, 1] = Value(TYPE_INT, int(out_g))
+    dest_arr[y, x, 2] = Value(TYPE_INT, int(out_b))
+    dest_arr[y, x, 3] = Value(TYPE_INT, int(out_a))
+
+
 # ---- Windows GDI+ fast path ----
 
 if sys.platform == "win32":
@@ -787,6 +826,276 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
     return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=flat))
 
 
+def _op_polygon(interpreter, args, _arg_nodes, _env, location):
+    from interpreter import ASMRuntimeError, TYPE_TNS, TYPE_INT, Tensor, Value
+
+    # POLYGON(img, points, color, fill=1, thickness=1)
+    if len(args) < 3:
+        raise ASMRuntimeError("POLYGON expects at least 3 arguments", location=location, rewrite_rule="POLYGON")
+    img = interpreter._expect_tns(args[0], "POLYGON", location)
+    points = interpreter._expect_tns(args[1], "POLYGON", location)
+    color_t = interpreter._expect_tns(args[2], "POLYGON", location)
+
+    fill = 1
+    thickness = 1
+    if len(args) >= 4:
+        fill = interpreter._expect_int(args[3], "POLYGON", location)
+    if len(args) >= 5:
+        thickness = interpreter._expect_int(args[4], "POLYGON", location)
+
+    if len(img.shape) != 3 or img.shape[2] != 4:
+        raise ASMRuntimeError("POLYGON expects a 3D image tensor with 4 channels", location=location, rewrite_rule="POLYGON")
+    # points should be 2-D [N,2]
+    if len(points.shape) != 2 or points.shape[1] != 2:
+        raise ASMRuntimeError("POLYGON points must be a 2-D TNS of [x,y] pairs", location=location, rewrite_rule="POLYGON")
+    n_points = int(points.shape[0])
+    if n_points < 2:
+        raise ASMRuntimeError("POLYGON needs at least 2 points", location=location, rewrite_rule="POLYGON")
+
+    # Extract integer point coordinates (convert to 0-based)
+    pts_arr = points.data.reshape(tuple(points.shape))
+    pts: List[Tuple[int, int]] = []
+    for i in range(n_points):
+        px = interpreter._expect_int(pts_arr[i, 0], "POLYGON", location) - 1
+        py = interpreter._expect_int(pts_arr[i, 1], "POLYGON", location) - 1
+        pts.append((int(px), int(py)))
+
+    # First point must equal last
+    if pts[0] != pts[-1]:
+        raise ASMRuntimeError("POLYGON: first point must equal last point", location=location, rewrite_rule="POLYGON")
+
+    h, w, _ = img.shape
+    interpreter.builtins._ensure_tensor_ints(img, "POLYGON", location)
+    arr = img.data.reshape((h, w, 4))
+    new_arr = arr.copy()
+
+    # Extract color
+    if len(color_t.shape) != 1 or color_t.shape[0] != 4:
+        raise ASMRuntimeError("POLYGON color must be a 1-D TNS of length 4", location=location, rewrite_rule="POLYGON")
+    color_arr = color_t.data.reshape(tuple(color_t.shape))
+    r = interpreter._expect_int(color_arr[0], "POLYGON", location)
+    g = interpreter._expect_int(color_arr[1], "POLYGON", location)
+    b = interpreter._expect_int(color_arr[2], "POLYGON", location)
+    a = interpreter._expect_int(color_arr[3], "POLYGON", location)
+    color = (_clamp_channel(r), _clamp_channel(g), _clamp_channel(b), _clamp_channel(a))
+
+    # Helper to blend a pixel if in bounds
+    def blend(px: int, py: int) -> None:
+        if px < 0 or px >= w or py < 0 or py >= h:
+            return
+        _alpha_blend_pixel(new_arr, px, py, color, interpreter, "POLYGON", location)
+
+    # Bresenham integer line rasterization
+    def draw_line(x0: int, y0: int, x1: int, y1: int) -> None:
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        x, y = x0, y0
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        if dx > dy:
+            err = dx // 2
+            while True:
+                draw_thick(x, y)
+                if x == x1:
+                    break
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                x += sx
+        else:
+            err = dy // 2
+            while True:
+                draw_thick(x, y)
+                if y == y1:
+                    break
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                y += sy
+
+    # Draw a pixel with thickness (circle brush)
+    def draw_thick(cx: int, cy: int) -> None:
+        if thickness <= 1:
+            blend(cx, cy)
+            return
+        rrad = max(0, int(math.floor(thickness / 2)))
+        for dy in range(-rrad, rrad + 1):
+            yy = cy + dy
+            if yy < 0 or yy >= h:
+                continue
+            for dx in range(-rrad, rrad + 1):
+                xx = cx + dx
+                if xx < 0 or xx >= w:
+                    continue
+                if dx * dx + dy * dy <= rrad * rrad:
+                    blend(xx, yy)
+
+    if fill != 0:
+        # Scanline fill using even-odd rule
+        # Build edges
+        edges = []
+        for i in range(len(pts) - 1):
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            edges.append((x1, y1, x2, y2))
+        # Bounding box
+        min_x = max(0, min(p[0] for p in pts))
+        max_x = min(w - 1, max(p[0] for p in pts))
+        min_y = max(0, min(p[1] for p in pts))
+        max_y = min(h - 1, max(p[1] for p in pts))
+        for yy in range(min_y, max_y + 1):
+            scan_y = yy + 0.5
+            xs: List[float] = []
+            for (x1, y1, x2, y2) in edges:
+                if (y1 <= scan_y < y2) or (y2 <= scan_y < y1):
+                    if y2 == y1:
+                        continue
+                    t = (scan_y - y1) / float(y2 - y1)
+                    xi = x1 + t * (x2 - x1)
+                    xs.append(xi)
+            xs.sort()
+            i = 0
+            while i + 1 < len(xs):
+                x_left = xs[i]
+                x_right = xs[i + 1]
+                x_start = max(0, int(math.ceil(x_left)))
+                x_end = min(w - 1, int(math.floor(x_right)))
+                for xx in range(x_start, x_end + 1):
+                    blend(xx, yy)
+                i += 2
+        # Optionally draw outline
+        if thickness > 0:
+            for i in range(len(pts) - 1):
+                x1, y1 = pts[i]
+                x2, y2 = pts[i + 1]
+                draw_line(x1, y1, x2, y2)
+    else:
+        # Outline only: draw each segment
+        for i in range(len(pts) - 1):
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            draw_line(x1, y1, x2, y2)
+
+    flat = np.array(new_arr.flatten(), dtype=object)
+    return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
+
+
+
+def _op_ellipse(interpreter, args, _arg_nodes, _env, location):
+    from interpreter import ASMRuntimeError, TYPE_TNS, Tensor, Value
+    # New signature: ELLIPSE(img, center:TNS[2], rx, ry, color:TNS[4], fill=1, thickness=1)
+    if len(args) < 5:
+        raise ASMRuntimeError("ELLIPSE expects at least 5 arguments", location=location, rewrite_rule="ELLIPSE")
+
+    img = interpreter._expect_tns(args[0], "ELLIPSE", location)
+
+    # Support both new signature (center:TNS) and legacy (cx, cy)
+    second = args[1]
+    center_t = None
+    if getattr(second, "type", None) == TYPE_TNS:
+        # New form: img, center:TNS, rx, ry, color, [fill], [thickness]
+        if len(args) < 5:
+            raise ASMRuntimeError("ELLIPSE expects at least 5 arguments", location=location, rewrite_rule="ELLIPSE")
+        center_t = interpreter._expect_tns(args[1], "ELLIPSE", location)
+        rx = interpreter._expect_int(args[2], "ELLIPSE", location)
+        ry = interpreter._expect_int(args[3], "ELLIPSE", location)
+        color_t = interpreter._expect_tns(args[4], "ELLIPSE", location)
+        arg_base = 5
+    else:
+        # Legacy form: img, cx, cy, rx, ry, color, [fill], [thickness]
+        if len(args) < 6:
+            raise ASMRuntimeError("ELLIPSE expects at least 6 arguments (legacy form)", location=location, rewrite_rule="ELLIPSE")
+        cx = interpreter._expect_int(args[1], "ELLIPSE", location)
+        cy = interpreter._expect_int(args[2], "ELLIPSE", location)
+        rx = interpreter._expect_int(args[3], "ELLIPSE", location)
+        ry = interpreter._expect_int(args[4], "ELLIPSE", location)
+        color_t = interpreter._expect_tns(args[5], "ELLIPSE", location)
+        arg_base = 6
+
+    fill = 1
+    thickness = 1
+    if len(args) >= arg_base + 1:
+        fill = interpreter._expect_int(args[arg_base], "ELLIPSE", location)
+    if len(args) >= arg_base + 2:
+        thickness = interpreter._expect_int(args[arg_base + 1], "ELLIPSE", location)
+
+    if rx <= 0 or ry <= 0:
+        raise ASMRuntimeError("ELLIPSE radii must be positive", location=location, rewrite_rule="ELLIPSE")
+    if thickness <= 0:
+        raise ASMRuntimeError("ELLIPSE thickness must be positive", location=location, rewrite_rule="ELLIPSE")
+
+    if len(img.shape) != 3 or img.shape[2] != 4:
+        raise ASMRuntimeError("ELLIPSE expects a 3D image tensor with 4 channels", location=location, rewrite_rule="ELLIPSE")
+
+    interpreter.builtins._ensure_tensor_ints(img, "ELLIPSE", location)
+
+    h, w, _ = img.shape
+    arr = img.data.reshape((h, w, 4))
+    new_arr = arr.copy()
+
+    if len(color_t.shape) != 1 or color_t.shape[0] != 4:
+        raise ASMRuntimeError("ELLIPSE color must be a 1-D TNS of length 4", location=location, rewrite_rule="ELLIPSE")
+    color_arr = color_t.data.reshape(tuple(color_t.shape))
+    r = interpreter._expect_int(color_arr[0], "ELLIPSE", location)
+    g = interpreter._expect_int(color_arr[1], "ELLIPSE", location)
+    b = interpreter._expect_int(color_arr[2], "ELLIPSE", location)
+    a = interpreter._expect_int(color_arr[3], "ELLIPSE", location)
+    color = (_clamp_channel(r), _clamp_channel(g), _clamp_channel(b), _clamp_channel(a))
+
+    # If center tensor was provided, extract cx, cy; otherwise use legacy values
+    if center_t is not None:
+        if len(center_t.shape) != 1 or center_t.shape[0] < 2:
+            raise ASMRuntimeError("ELLIPSE center must be a 1-D TNS of length >= 2", location=location, rewrite_rule="ELLIPSE")
+        center_arr = center_t.data.reshape(tuple(center_t.shape))
+        cx = interpreter._expect_int(center_arr[0], "ELLIPSE", location)
+        cy = interpreter._expect_int(center_arr[1], "ELLIPSE", location)
+
+    cx0 = cx - 1
+    cy0 = cy - 1
+
+    rx_f = float(rx)
+    ry_f = float(ry)
+
+    inner_rx = max(0, rx - thickness)
+    inner_ry = max(0, ry - thickness)
+    has_inner = (fill == 0 and inner_rx > 0 and inner_ry > 0)
+    if fill == 0 and not has_inner:
+        # If the outline would collapse, fall back to filled behavior
+        fill = 1
+
+    x_start = cx0 - rx
+    x_end = cx0 + rx
+    y_start = cy0 - ry
+    y_end = cy0 + ry
+
+    for yy in range(y_start, y_end + 1):
+        if yy < 0 or yy >= h:
+            continue
+        dy = float(yy - cy0)
+        ny = dy / ry_f
+        for xx in range(x_start, x_end + 1):
+            if xx < 0 or xx >= w:
+                continue
+            dx = float(xx - cx0)
+            nx = dx / rx_f
+            dist = nx * nx + ny * ny
+            if dist > 1.0:
+                continue
+            if has_inner:
+                in_rx = float(inner_rx)
+                in_ry = float(inner_ry)
+                in_nx = dx / in_rx
+                in_ny = dy / in_ry
+                if (in_nx * in_nx + in_ny * in_ny) < 1.0:
+                    continue
+            _alpha_blend_pixel(new_arr, xx, yy, color, interpreter, "ELLIPSE", location)
+
+    flat = np.array(new_arr.flatten(), dtype=object)
+    return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
+
+
 def _write_bmp_file(path: str, width: int, height: int, pixels: List[int]) -> None:
     # Write a simple 32-bit BMP (BGRA) uncompressed
     with open(path, "wb") as handle:
@@ -993,17 +1302,99 @@ def _op_save_jpeg(interpreter, args, _arg_nodes, _env, location):
 
 # ---- Registration ----
 
+def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
+    from interpreter import ASMRuntimeError, TYPE_INT, TYPE_TNS, Tensor, Value
+
+    if len(args) != 3:
+        raise ASMRuntimeError("REPLACE_COLOR expects 3 arguments", location=location, rewrite_rule="REPLACE_COLOR")
+    img = interpreter._expect_tns(args[0], "REPLACE_COLOR", location)
+    src_col_t = interpreter._expect_tns(args[1], "REPLACE_COLOR", location)
+    dst_col_t = interpreter._expect_tns(args[2], "REPLACE_COLOR", location)
+
+    # Colors may be length 3 (RGB) or 4 (RGBA)
+    if len(src_col_t.shape) != 1 or src_col_t.shape[0] not in (3, 4):
+        raise ASMRuntimeError("REPLACE_COLOR: src_color must be a 1-D TNS length 3 or 4", location=location, rewrite_rule="REPLACE_COLOR")
+    if len(dst_col_t.shape) != 1 or dst_col_t.shape[0] not in (3, 4):
+        raise ASMRuntimeError("REPLACE_COLOR: dst_color must be a 1-D TNS length 3 or 4", location=location, rewrite_rule="REPLACE_COLOR")
+
+    if len(img.shape) != 3 or img.shape[2] != 4:
+        raise ASMRuntimeError("REPLACE_COLOR expects a 3D image tensor with 4 channels", location=location, rewrite_rule="REPLACE_COLOR")
+
+    h, w, _ = img.shape
+    interpreter.builtins._ensure_tensor_ints(img, "REPLACE_COLOR", location)
+    src_arr = img.data.reshape((h, w, 4))
+    new_arr = src_arr.copy()
+
+    s_arr = src_col_t.data.reshape(tuple(src_col_t.shape))
+    d_arr = dst_col_t.data.reshape(tuple(dst_col_t.shape))
+
+    # Extract source color components (may omit alpha)
+    s_r = interpreter._expect_int(s_arr[0], "REPLACE_COLOR", location)
+    s_g = interpreter._expect_int(s_arr[1], "REPLACE_COLOR", location)
+    s_b = interpreter._expect_int(s_arr[2], "REPLACE_COLOR", location)
+    s_has_alpha = (src_col_t.shape[0] == 4)
+    s_a = interpreter._expect_int(s_arr[3], "REPLACE_COLOR", location) if s_has_alpha else None
+
+    # Extract destination color components
+    d_r = interpreter._expect_int(d_arr[0], "REPLACE_COLOR", location)
+    d_g = interpreter._expect_int(d_arr[1], "REPLACE_COLOR", location)
+    d_b = interpreter._expect_int(d_arr[2], "REPLACE_COLOR", location)
+    d_has_alpha = (dst_col_t.shape[0] == 4)
+    d_a = interpreter._expect_int(d_arr[3], "REPLACE_COLOR", location) if d_has_alpha else None
+
+    # Clamp destination channels now
+    d_r = _clamp_channel(d_r)
+    d_g = _clamp_channel(d_g)
+    d_b = _clamp_channel(d_b)
+    if d_has_alpha:
+        d_a = _clamp_channel(d_a)
+
+    for y in range(h):
+        for x in range(w):
+            p_r = interpreter._expect_int(new_arr[y, x, 0], "REPLACE_COLOR", location)
+            p_g = interpreter._expect_int(new_arr[y, x, 1], "REPLACE_COLOR", location)
+            p_b = interpreter._expect_int(new_arr[y, x, 2], "REPLACE_COLOR", location)
+            p_a = interpreter._expect_int(new_arr[y, x, 3], "REPLACE_COLOR", location)
+
+            match = False
+            if s_has_alpha:
+                # exact RGBA match
+                if p_r == s_r and p_g == s_g and p_b == s_b and p_a == s_a:
+                    match = True
+            else:
+                # RGB match, alpha is treated as wildcard (matches any alpha)
+                if p_r == s_r and p_g == s_g and p_b == s_b:
+                    match = True
+
+            if not match:
+                continue
+
+            # Replace channels. If dst is RGB-only, preserve original alpha.
+            new_arr[y, x, 0] = Value(TYPE_INT, int(d_r))
+            new_arr[y, x, 1] = Value(TYPE_INT, int(d_g))
+            new_arr[y, x, 2] = Value(TYPE_INT, int(d_b))
+            if d_has_alpha:
+                new_arr[y, x, 3] = Value(TYPE_INT, int(d_a))
+            else:
+                new_arr[y, x, 3] = Value(TYPE_INT, int(p_a))
+
+    flat = np.array(new_arr.flatten(), dtype=object)
+    return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
+
 def asm_lang_register(ext: ExtensionAPI) -> None:
     ext.metadata(name="image", version="0.1.0")
-    ext.register_operator("LOAD_PNG", 1, 1, _op_load_png, doc="LOAD_PNG(path) -> TNS[height][width][r,g,b,a]")
-    ext.register_operator("LOAD_JPEG", 1, 1, _op_load_jpeg, doc="LOAD_JPEG(path) -> TNS[height][width][r,g,b,a]")
-    ext.register_operator("LOAD_BMP", 1, 1, _op_load_bmp, doc="LOAD_BMP(path) -> TNS[height][width][r,g,b,a]")
-    ext.register_operator("SAVE_BMP", 2, 2, _op_save_bmp, doc="SAVE_BMP(TNS:img, STR:path) -> STR:OK")
-    ext.register_operator("SAVE_PNG", 3, 3, _op_save_png, doc="SAVE_PNG(TNS:img, STR:path, INT:compression_level) -> STR:OK")
-    ext.register_operator("SAVE_JPEG", 3, 3, _op_save_jpeg, doc="SAVE_JPEG(TNS:img, STR:path, INT:quality) -> STR:OK")
-    ext.register_operator("BLIT", 4, 5, _op_blit, doc="BLIT(TNS:src, TNS:dest, INT:x, INT:y, INT:mixalpha=1) -> TNS")
-    ext.register_operator("SCALE", 3, 4, _op_scale, doc="SCALE(TNS:src, INT:scale_x, INT:scale_y, INT:antialiasing=1) -> TNS")
-    ext.register_operator("ROTATE", 2, 2, _op_rotate, doc="ROTATE(TNS:img, FLT:degrees) -> TNS")
-    ext.register_operator("CROP", 5, 5, _op_crop, doc="CROP(TNS:img, INT:top, INT:right, INT:bottom, INT:left) -> TNS")
-    ext.register_operator("GRAYSCALE", 1, 1, _op_grayscale, doc="GRAYSCALE(TNS:img) -> TNS (rgb channels set to luminance, alpha preserved)")
-    ext.register_operator("BLUR", 2, 2, _op_blur, doc="BLUR(TNS:img, INT:radius) -> TNS (gaussian blur, radius in pixels)")
+    ext.register_operator("LOAD_PNG", 1, 1, _op_load_png, doc="LOAD_PNG(path):TNS[height][width][r,g,b,a]")
+    ext.register_operator("LOAD_JPEG", 1, 1, _op_load_jpeg, doc="LOAD_JPEG(path):TNS[height][width][r,g,b,a]")
+    ext.register_operator("LOAD_BMP", 1, 1, _op_load_bmp, doc="LOAD_BMP(path):TNS[height][width][r,g,b,a]")
+    ext.register_operator("SAVE_BMP", 2, 2, _op_save_bmp, doc="SAVE_BMP(TNS:img, STR:path):STR ; OK")
+    ext.register_operator("SAVE_PNG", 3, 3, _op_save_png, doc="SAVE_PNG(TNS:img, STR:path, INT:compression_level):STR ; OK")
+    ext.register_operator("SAVE_JPEG", 3, 3, _op_save_jpeg, doc="SAVE_JPEG(TNS:img, STR:path, INT:quality):STR ; OK")
+    ext.register_operator("BLIT", 4, 5, _op_blit, doc="BLIT(TNS:src, TNS:dest, INT:x, INT:y, INT:mixalpha=1):TNS")
+    ext.register_operator("ELLIPSE", 6, 8, _op_ellipse, doc="ELLIPSE(TNS:img, INT:cx, INT:cy, INT:rx, INT:ry, TNS:color[r,g,b,a], INT:fill=1, INT:thickness=1) -> TNS")
+    ext.register_operator("POLYGON", 3, 5, _op_polygon, doc="POLYGON(TNS:img, TNS:points[[x,y]...], TNS:color[r,g,b,a], INT:fill=1, INT:thickness=1) -> TNS")
+    ext.register_operator("SCALE", 3, 4, _op_scale, doc="SCALE(TNS:src, INT:scale_x, INT:scale_y, INT:antialiasing=1):TNS")
+    ext.register_operator("ROTATE", 2, 2, _op_rotate, doc="ROTATE(TNS:img, FLT:degrees):TNS")
+    ext.register_operator("CROP", 5, 5, _op_crop, doc="CROP(TNS:img, INT:top, INT:right, INT:bottom, INT:left):TNS")
+    ext.register_operator("GRAYSCALE", 1, 1, _op_grayscale, doc="GRAYSCALE(TNS:img):TNS (rgb channels set to luminance, alpha preserved)")
+    ext.register_operator("BLUR", 2, 2, _op_blur, doc="BLUR(TNS:img, INT:radius):TNS (gaussian blur, radius in pixels)")
+    ext.register_operator("REPLACE_COLOR", 3, 3, _op_replace_color, doc="REPLACE_COLOR(TNS:img, TNS:src_color[3|4], TNS:dst_color[3|4]):TNS - Replace src_color with dst_color; RGB dst preserves alpha if dst has no alpha")
