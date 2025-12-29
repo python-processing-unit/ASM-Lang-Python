@@ -435,6 +435,7 @@ class Builtins:
         self._register_custom("CONVOLVE", 2, 2, self._convolve)
         self._register_custom("FLIP", 1, 1, self._flip)
         self._register_custom("TFLIP", 2, 2, self._tflip)
+        self._register_custom("SCATTER", 3, 3, self._scatter)
 
     def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
         def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
@@ -2315,6 +2316,52 @@ class Builtins:
         new_data = flipped.ravel().copy()
         return Value(TYPE_TNS, Tensor(shape=list(tensor.shape), data=new_data))
 
+    def _scatter(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        """SCATTER(TNS: src, TNS: dst, TNS: ind):TNS
+
+        Copy `src` into a slice of `dst` defined by per-dimension [lo, hi] pairs.
+        Returns a new tensor shaped like `dst` with the slice replaced.
+        """
+
+        src = self._expect_tns(args[0], "SCATTER", location)
+        dst = self._expect_tns(args[1], "SCATTER", location)
+        ind = self._expect_tns(args[2], "SCATTER", location)
+
+        rank = len(dst.shape)
+        if len(src.shape) != rank:
+            raise ASMRuntimeError("SCATTER requires src and dst to have the same rank", location=location, rewrite_rule="SCATTER")
+        if len(ind.shape) != 2 or ind.shape[0] != rank or ind.shape[1] != 2:
+            raise ASMRuntimeError("SCATTER indices must have shape [rank, 2]", location=location, rewrite_rule="SCATTER")
+
+        pairs = ind.data.reshape((ind.shape[0], ind.shape[1]))
+        slices: List[Tuple[int, int]] = []
+
+        for axis in range(rank):
+            lo_raw = self._expect_int(pairs[axis, 0], "SCATTER", location)
+            hi_raw = self._expect_int(pairs[axis, 1], "SCATTER", location)
+            dim_len = dst.shape[axis]
+            lo = self._resolve_tensor_index(lo_raw, dim_len, "SCATTER", location)
+            hi = self._resolve_tensor_index(hi_raw, dim_len, "SCATTER", location)
+            if lo > hi:
+                raise ASMRuntimeError("SCATTER expects lo <= hi for each dimension", location=location, rewrite_rule="SCATTER")
+            span = hi - lo + 1
+            if span != src.shape[axis]:
+                raise ASMRuntimeError("SCATTER source shape must match index span", location=location, rewrite_rule="SCATTER")
+            slices.append((lo - 1, hi))
+
+        out_data = dst.data.copy()
+        dst_view = out_data.reshape(tuple(dst.shape))
+        src_view = src.data.reshape(tuple(src.shape))
+        dst_view[tuple(slice(start, end) for start, end in slices)] = src_view
+        return Value(TYPE_TNS, Tensor(shape=list(dst.shape), data=out_data))
+
     def _convolve(
         self,
         interpreter: "Interpreter",
@@ -3110,6 +3157,17 @@ class Interpreter:
             if dim <= 0:
                 raise ASMRuntimeError("Tensor dimensions must be positive", location=location, rewrite_rule=rule)
 
+    def _resolve_tensor_index(self, raw: int, dim_len: int, rule: str, location: SourceLocation) -> int:
+        """Map a 1-based (or negative-from-end) index into the current dimension."""
+        if raw == 0:
+            raise ASMRuntimeError("Tensor indices are 1-indexed", location=location, rewrite_rule=rule)
+        idx = raw
+        if raw < 0:
+            idx = dim_len + raw + 1
+        if idx <= 0 or idx > dim_len:
+            raise ASMRuntimeError("Tensor index out of range", location=location, rewrite_rule=rule)
+        return idx
+
     def _tensor_flat_index(self, tensor: Tensor, indices: List[int], rule: str, location: SourceLocation) -> int:
         if len(indices) != len(tensor.shape):
             raise ASMRuntimeError("Incorrect number of tensor indices", location=location, rewrite_rule=rule)
@@ -3118,13 +3176,7 @@ class Interpreter:
         strides = tensor.strides
         for i, raw in enumerate(indices):
             dim_len = shape[i]
-            idx = raw
-            if idx == 0:
-                raise ASMRuntimeError("Tensor indices are 1-indexed", location=location, rewrite_rule=rule)
-            if idx < 0:
-                idx = dim_len + idx + 1
-            if idx <= 0 or idx > dim_len:
-                raise ASMRuntimeError("Tensor index out of range", location=location, rewrite_rule=rule)
+            idx = self._resolve_tensor_index(raw, dim_len, rule, location)
             offset += (idx - 1) * strides[i]
         return int(offset)
 

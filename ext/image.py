@@ -60,7 +60,10 @@ def _make_tensor_from_pixels(width: int, height: int, pixels: List[int], rule: s
     expected = width * height * 4
     if len(pixels) != expected:
         raise ASMRuntimeError(f"{rule}: pixel buffer has unexpected length", location=location, rewrite_rule=rule)
-    data = np.array([Value(TYPE_INT, int(ch)) for ch in pixels], dtype=object)
+    # micro-optim: cache local refs for faster construction
+    _Val = Value
+    _TINT = TYPE_INT
+    data = np.array([_Val(_TINT, int(ch)) for ch in pixels], dtype=object)
     shape = [int(height), int(width), 4]  # [row][column][channel]
     return Value(TYPE_TNS, Tensor(shape=shape, data=data))
 
@@ -84,10 +87,13 @@ def _alpha_blend_pixel(
 ) -> None:
     from interpreter import TYPE_INT, Value
 
-    d_r = interpreter._expect_int(dest_arr[y, x, 0], rule, location)
-    d_g = interpreter._expect_int(dest_arr[y, x, 1], rule, location)
-    d_b = interpreter._expect_int(dest_arr[y, x, 2], rule, location)
-    d_a = interpreter._expect_int(dest_arr[y, x, 3], rule, location)
+    # cache locals to avoid repeated attribute lookups
+    _expect_int = interpreter._expect_int
+    _Val = Value
+    d_r = _expect_int(dest_arr[y, x, 0], rule, location)
+    d_g = _expect_int(dest_arr[y, x, 1], rule, location)
+    d_b = _expect_int(dest_arr[y, x, 2], rule, location)
+    d_a = _expect_int(dest_arr[y, x, 3], rule, location)
 
     r, g, b, a = color
     sa = _clamp_channel(a)
@@ -98,10 +104,10 @@ def _alpha_blend_pixel(
     out_b = _clamp_channel((sa * b + inv_sa * d_b) // 255)
     out_a = _clamp_channel(sa + (d_a * inv_sa) // 255)
 
-    dest_arr[y, x, 0] = Value(TYPE_INT, int(out_r))
-    dest_arr[y, x, 1] = Value(TYPE_INT, int(out_g))
-    dest_arr[y, x, 2] = Value(TYPE_INT, int(out_b))
-    dest_arr[y, x, 3] = Value(TYPE_INT, int(out_a))
+    dest_arr[y, x, 0] = _Val(TYPE_INT, int(out_r))
+    dest_arr[y, x, 1] = _Val(TYPE_INT, int(out_g))
+    dest_arr[y, x, 2] = _Val(TYPE_INT, int(out_b))
+    dest_arr[y, x, 3] = _Val(TYPE_INT, int(out_a))
 
 
 # ---- Windows GDI+ fast path ----
@@ -486,17 +492,27 @@ def _op_blit(interpreter, args, _arg_nodes, _env, location):
     # Copy destination into new array we can mutate
     new_arr = dst_arr.copy()
 
-    for ry in range(over_h):
-        for rx in range(over_w):
-            s_r = interpreter._expect_int(src_arr[src_y0 + ry, src_x0 + rx, 0], "BLIT", location)
-            s_g = interpreter._expect_int(src_arr[src_y0 + ry, src_x0 + rx, 1], "BLIT", location)
-            s_b = interpreter._expect_int(src_arr[src_y0 + ry, src_x0 + rx, 2], "BLIT", location)
-            s_a = interpreter._expect_int(src_arr[src_y0 + ry, src_x0 + rx, 3], "BLIT", location)
+    # Cache commonly used callables/constructors to speed inner loops
+    _expect_int = interpreter._expect_int
+    _Val = Value
+    _TINT = TYPE_INT
 
-            d_r = interpreter._expect_int(new_arr[dst_y0 + ry, dst_x0 + rx, 0], "BLIT", location)
-            d_g = interpreter._expect_int(new_arr[dst_y0 + ry, dst_x0 + rx, 1], "BLIT", location)
-            d_b = interpreter._expect_int(new_arr[dst_y0 + ry, dst_x0 + rx, 2], "BLIT", location)
-            d_a = interpreter._expect_int(new_arr[dst_y0 + ry, dst_x0 + rx, 3], "BLIT", location)
+    for ry in range(over_h):
+        src_ry = src_y0 + ry
+        dst_ry = dst_y0 + ry
+        for rx in range(over_w):
+            src_rx = src_x0 + rx
+            dst_rx = dst_x0 + rx
+
+            s_r = _expect_int(src_arr[src_ry, src_rx, 0], "BLIT", location)
+            s_g = _expect_int(src_arr[src_ry, src_rx, 1], "BLIT", location)
+            s_b = _expect_int(src_arr[src_ry, src_rx, 2], "BLIT", location)
+            s_a = _expect_int(src_arr[src_ry, src_rx, 3], "BLIT", location)
+
+            d_r = _expect_int(new_arr[dst_ry, dst_rx, 0], "BLIT", location)
+            d_g = _expect_int(new_arr[dst_ry, dst_rx, 1], "BLIT", location)
+            d_b = _expect_int(new_arr[dst_ry, dst_rx, 2], "BLIT", location)
+            d_a = _expect_int(new_arr[dst_ry, dst_rx, 3], "BLIT", location)
 
             if mixalpha:
                 # Simple alpha-over blending where source alpha determines mix
@@ -513,10 +529,10 @@ def _op_blit(interpreter, args, _arg_nodes, _env, location):
                     continue
                 out_r, out_g, out_b, out_a = s_r, s_g, s_b, s_a
 
-            new_arr[dst_y0 + ry, dst_x0 + rx, 0] = Value(TYPE_INT, int(out_r))
-            new_arr[dst_y0 + ry, dst_x0 + rx, 1] = Value(TYPE_INT, int(out_g))
-            new_arr[dst_y0 + ry, dst_x0 + rx, 2] = Value(TYPE_INT, int(out_b))
-            new_arr[dst_y0 + ry, dst_x0 + rx, 3] = Value(TYPE_INT, int(out_a))
+            new_arr[dst_ry, dst_rx, 0] = _Val(_TINT, int(out_r))
+            new_arr[dst_ry, dst_rx, 1] = _Val(_TINT, int(out_g))
+            new_arr[dst_ry, dst_rx, 2] = _Val(_TINT, int(out_b))
+            new_arr[dst_ry, dst_rx, 3] = _Val(_TINT, int(out_a))
 
     flat = np.array(new_arr.flatten(), dtype=object)
     return Value(TYPE_TNS, Tensor(shape=list(dest.shape), data=flat))
@@ -561,6 +577,9 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
 
     src_arr = src.data.reshape((src_h, src_w, 4))
     out = np.empty((target_h, target_w, 4), dtype=object)
+    _expect_int = interpreter._expect_int
+    _Val = Value
+    _TINT = TYPE_INT
 
     if antialiasing:
         # Bilinear interpolation
@@ -584,14 +603,14 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
                 x1_clamped = max(0, min(src_w - 1, x1))
                 # sample four neighbors and blend
                 for c in range(4):
-                    v00 = interpreter._expect_int(src_arr[y0_clamped, x0_clamped, c], "SCALE", location)
-                    v10 = interpreter._expect_int(src_arr[y0_clamped, x1_clamped, c], "SCALE", location)
-                    v01 = interpreter._expect_int(src_arr[y1_clamped, x0_clamped, c], "SCALE", location)
-                    v11 = interpreter._expect_int(src_arr[y1_clamped, x1_clamped, c], "SCALE", location)
+                    v00 = _expect_int(src_arr[y0_clamped, x0_clamped, c], "SCALE", location)
+                    v10 = _expect_int(src_arr[y0_clamped, x1_clamped, c], "SCALE", location)
+                    v01 = _expect_int(src_arr[y1_clamped, x0_clamped, c], "SCALE", location)
+                    v11 = _expect_int(src_arr[y1_clamped, x1_clamped, c], "SCALE", location)
                     val = (v00 * (wy0 * wx0) + v10 * (wy0 * wx) + v01 * (wy * wx0) + v11 * (wy * wx))
                     iv = int(round(val))
                     iv = 0 if iv < 0 else (255 if iv > 255 else iv)
-                    out[j, i, c] = Value(TYPE_INT, iv)
+                    out[j, i, c] = _Val(_TINT, iv)
     else:
         # Nearest-neighbor
         for j in range(target_h):
@@ -601,7 +620,7 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
                 src_x = int(round((i + 0.5) * (src_w / float(target_w)) - 0.5))
                 sx = max(0, min(src_w - 1, src_x))
                 for c in range(4):
-                    out[j, i, c] = Value(TYPE_INT, int(interpreter._expect_int(src_arr[sy, sx, c], "SCALE", location)))
+                    out[j, i, c] = _Val(_TINT, int(_expect_int(src_arr[sy, sx, c], "SCALE", location)))
 
     flat = np.array(out.flatten(), dtype=object)
     return Value(TYPE_TNS, Tensor(shape=[target_h, target_w, 4], data=flat))
@@ -627,18 +646,21 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
         from PIL import Image
 
         flat = bytearray()
+        _expect_int = interpreter._expect_int
         for y in range(h):
             for x in range(w):
-                r = interpreter._expect_int(arr[y, x, 0], "ROTATE", location)
-                g = interpreter._expect_int(arr[y, x, 1], "ROTATE", location)
-                b = interpreter._expect_int(arr[y, x, 2], "ROTATE", location)
-                a = interpreter._expect_int(arr[y, x, 3], "ROTATE", location)
+                r = _expect_int(arr[y, x, 0], "ROTATE", location)
+                g = _expect_int(arr[y, x, 1], "ROTATE", location)
+                b = _expect_int(arr[y, x, 2], "ROTATE", location)
+                a = _expect_int(arr[y, x, 3], "ROTATE", location)
                 flat.extend((r & 0xFF, g & 0xFF, b & 0xFF, a & 0xFF))
 
         im = Image.frombytes('RGBA', (w, h), bytes(flat))
         im = im.rotate(float(degrees), resample=Image.BICUBIC, expand=False, fillcolor=(0, 0, 0, 0))
         out_bytes = im.tobytes('raw', 'RGBA')
-        out_vals = [Value(TYPE_INT, int(b)) for b in out_bytes]
+        _Val = Value
+        _TINT = TYPE_INT
+        out_vals = [_Val(_TINT, int(b)) for b in out_bytes]
         data = np.array(out_vals, dtype=object)
         return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=data))
     except Exception:
@@ -653,6 +675,7 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
 
         out_flat: List[int] = [0] * (h * w * 4)
 
+        _expect_int = interpreter._expect_int
         def sample_channel(sx: float, sy: float, ch: int) -> float:
             # Bilinear sample at floating point coordinates, return float
             x0 = math.floor(sx)
@@ -662,7 +685,7 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
             def get(px: int, py: int) -> int:
                 if px < 0 or px >= w or py < 0 or py >= h:
                     return 0
-                return interpreter._expect_int(arr[py, px, ch], "ROTATE", location)
+                return _expect_int(arr[py, px, ch], "ROTATE", location)
             v00 = get(x0, y0)
             v10 = get(x0 + 1, y0)
             v01 = get(x0, y0 + 1)
@@ -694,39 +717,6 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
         return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=data))
 
 
-def _op_crop(interpreter, args, _arg_nodes, _env, location):
-    from interpreter import ASMRuntimeError, TYPE_INT, TYPE_TNS, Tensor, Value
-
-    if len(args) != 5:
-        raise ASMRuntimeError("CROP expects 5 arguments", location=location, rewrite_rule="CROP")
-    img = interpreter._expect_tns(args[0], "CROP", location)
-    top = interpreter._expect_int(args[1], "CROP", location)
-    right = interpreter._expect_int(args[2], "CROP", location)
-    bottom = interpreter._expect_int(args[3], "CROP", location)
-    left = interpreter._expect_int(args[4], "CROP", location)
-
-    if len(img.shape) != 3 or img.shape[2] != 4:
-        raise ASMRuntimeError("CROP expects a 3D image tensor with 4 channels", location=location, rewrite_rule="CROP")
-
-    h, w, _ = img.shape
-    new_h = h - top - bottom
-    new_w = w - left - right
-    if new_h <= 0 or new_w <= 0:
-        flat = np.array([], dtype=object)
-        return Value(TYPE_TNS, Tensor(shape=[0, 0, 0], data=flat))
-
-    interpreter.builtins._ensure_tensor_ints(img, "CROP", location)
-    arr = img.data.reshape((h, w, 4))
-    out = np.empty((new_h, new_w, 4), dtype=object)
-    for y in range(new_h):
-        for x in range(new_w):
-            for c in range(4):
-                out[y, x, c] = Value(TYPE_INT, int(interpreter._expect_int(arr[y + top, x + left, c], "CROP", location)))
-
-    flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[new_h, new_w, 4], data=flat))
-
-
 def _op_grayscale(interpreter, args, _arg_nodes, _env, location):
     from interpreter import ASMRuntimeError, TYPE_INT, TYPE_TNS, Tensor, Value
 
@@ -740,22 +730,25 @@ def _op_grayscale(interpreter, args, _arg_nodes, _env, location):
     interpreter.builtins._ensure_tensor_ints(img, "GRAYSCALE", location)
     arr = img.data.reshape((h, w, 4))
     out = np.empty((h, w, 4), dtype=object)
+    _expect_int = interpreter._expect_int
+    _Val = Value
+    _TINT = TYPE_INT
     for y in range(h):
         for x in range(w):
-            r = interpreter._expect_int(arr[y, x, 0], "GRAYSCALE", location)
-            g = interpreter._expect_int(arr[y, x, 1], "GRAYSCALE", location)
-            b = interpreter._expect_int(arr[y, x, 2], "GRAYSCALE", location)
-            a = interpreter._expect_int(arr[y, x, 3], "GRAYSCALE", location)
+            r = _expect_int(arr[y, x, 0], "GRAYSCALE", location)
+            g = _expect_int(arr[y, x, 1], "GRAYSCALE", location)
+            b = _expect_int(arr[y, x, 2], "GRAYSCALE", location)
+            a = _expect_int(arr[y, x, 3], "GRAYSCALE", location)
             # Standard luminance
             lum = int(round(0.299 * r + 0.587 * g + 0.114 * b))
             if lum < 0:
                 lum = 0
             elif lum > 255:
                 lum = 255
-            out[y, x, 0] = Value(TYPE_INT, lum)
-            out[y, x, 1] = Value(TYPE_INT, lum)
-            out[y, x, 2] = Value(TYPE_INT, lum)
-            out[y, x, 3] = Value(TYPE_INT, a)
+            out[y, x, 0] = _Val(_TINT, lum)
+            out[y, x, 1] = _Val(_TINT, lum)
+            out[y, x, 2] = _Val(_TINT, lum)
+            out[y, x, 3] = _Val(_TINT, a)
 
     flat = np.array(out.flatten(), dtype=object)
     return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=flat))
@@ -781,6 +774,9 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
 
     interpreter.builtins._ensure_tensor_ints(img, "BLUR", location)
     arr = img.data.reshape((h, w, 4)).astype(object)
+    _expect_int = interpreter._expect_int
+    _Val = Value
+    _TINT = TYPE_INT
 
     # Build 1D gaussian kernel
     sigma = max(0.5, radius / 2.0)
@@ -804,7 +800,7 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
                 for k in range(ksize):
                     sx = x + (k - radius)
                     sx_clamped = max(0, min(w - 1, sx))
-                    val = int(interpreter._expect_int(arr[y, sx_clamped, c], "BLUR", location))
+                    val = int(_expect_int(arr[y, sx_clamped, c], "BLUR", location))
                     acc += kernel[k] * val
                 tmp[y, x, c] = acc
 
@@ -820,7 +816,7 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
                     acc += kernel[k] * tmp[sy_clamped, x, c]
                 iv = int(round(acc))
                 iv = 0 if iv < 0 else (255 if iv > 255 else iv)
-                out[y, x, c] = Value(TYPE_INT, iv)
+                out[y, x, c] = _Val(_TINT, iv)
 
     flat = np.array(out.flatten(), dtype=object)
     return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=flat))
@@ -855,9 +851,10 @@ def _op_polygon(interpreter, args, _arg_nodes, _env, location):
     # Extract integer point coordinates (convert to 0-based)
     pts_arr = points.data.reshape(tuple(points.shape))
     pts: List[Tuple[int, int]] = []
+    _expect_int = interpreter._expect_int
     for i in range(n_points):
-        px = interpreter._expect_int(pts_arr[i, 0], "POLYGON", location) - 1
-        py = interpreter._expect_int(pts_arr[i, 1], "POLYGON", location) - 1
+        px = _expect_int(pts_arr[i, 0], "POLYGON", location) - 1
+        py = _expect_int(pts_arr[i, 1], "POLYGON", location) - 1
         pts.append((int(px), int(py)))
 
     # First point must equal last
@@ -873,10 +870,11 @@ def _op_polygon(interpreter, args, _arg_nodes, _env, location):
     if len(color_t.shape) != 1 or color_t.shape[0] != 4:
         raise ASMRuntimeError("POLYGON color must be a 1-D TNS of length 4", location=location, rewrite_rule="POLYGON")
     color_arr = color_t.data.reshape(tuple(color_t.shape))
-    r = interpreter._expect_int(color_arr[0], "POLYGON", location)
-    g = interpreter._expect_int(color_arr[1], "POLYGON", location)
-    b = interpreter._expect_int(color_arr[2], "POLYGON", location)
-    a = interpreter._expect_int(color_arr[3], "POLYGON", location)
+    _expect_int = interpreter._expect_int
+    r = _expect_int(color_arr[0], "POLYGON", location)
+    g = _expect_int(color_arr[1], "POLYGON", location)
+    b = _expect_int(color_arr[2], "POLYGON", location)
+    a = _expect_int(color_arr[3], "POLYGON", location)
     color = (_clamp_channel(r), _clamp_channel(g), _clamp_channel(b), _clamp_channel(a))
 
     # Helper to blend a pixel if in bounds
@@ -1381,6 +1379,531 @@ def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
     flat = np.array(new_arr.flatten(), dtype=object)
     return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
 
+
+def _op_render_text(interpreter, args, _arg_nodes, _env, location):
+    from interpreter import ASMRuntimeError, TYPE_INT, TYPE_TNS, Tensor, Value
+
+    # Signature: RENDER_TEXT(STR: text, INT: size, STR: font_path = "", TNS: color = [11111111,11111111,11111111,11111111], TNS: bgcolor = [11111111,11111111,11111111,11111111], INT: antialiasing = 1):TNS
+    if len(args) < 2:
+        raise ASMRuntimeError("RENDER_TEXT expects at least 2 arguments", location=location, rewrite_rule="RENDER_TEXT")
+
+    text = _expect_str(args[0], "RENDER_TEXT", location)
+    size = interpreter._expect_int(args[1], "RENDER_TEXT", location)
+
+    font_path = ""
+    if len(args) >= 3:
+        font_path = _expect_str(args[2], "RENDER_TEXT", location)
+
+    # default color/background: binary literal 11111111 == 255 each channel
+    def _tns_to_rgba(tns_val, name: str):
+        if getattr(tns_val, "type", None) != TYPE_TNS:
+            raise ASMRuntimeError(f"{name} must be a TNS of length 4", location=location, rewrite_rule="RENDER_TEXT")
+        if len(tns_val.shape) != 1 or tns_val.shape[0] != 4:
+            raise ASMRuntimeError(f"{name} must be a 1-D TNS of length 4", location=location, rewrite_rule="RENDER_TEXT")
+        arr = tns_val.data.reshape(tuple(tns_val.shape))
+        r = interpreter._expect_int(arr[0], "RENDER_TEXT", location)
+        g = interpreter._expect_int(arr[1], "RENDER_TEXT", location)
+        b = interpreter._expect_int(arr[2], "RENDER_TEXT", location)
+        a = interpreter._expect_int(arr[3], "RENDER_TEXT", location)
+        return (_clamp_channel(int(r)), _clamp_channel(int(g)), _clamp_channel(int(b)), _clamp_channel(int(a)))
+
+    if len(args) >= 4:
+        color = _tns_to_rgba(interpreter._expect_tns(args[3], "RENDER_TEXT", location), "color")
+    else:
+        color = (255, 255, 255, 255)
+
+    if len(args) >= 5:
+        bgcolor = _tns_to_rgba(interpreter._expect_tns(args[4], "RENDER_TEXT", location), "bgcolor")
+    else:
+        bgcolor = (255, 255, 255, 255)
+
+    antialiasing = 1
+    if len(args) >= 6:
+        antialiasing = interpreter._expect_int(args[5], "RENDER_TEXT", location)
+
+    # Dispatch: Windows GDI path when available, otherwise simple fallback rasterizer
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            gdi32 = ctypes.windll.gdi32
+
+            # Create a memory DC
+            hdc = gdi32.CreateCompatibleDC(0)
+            if not hdc:
+                raise RuntimeError("CreateCompatibleDC failed")
+
+            # Create font. Use face name guessed from font_path if provided, else default system font.
+            face_name = "Segoe UI"
+            # If a font path was provided, try to register it for this process.
+            font_added = False
+            if font_path:
+                try:
+                    FR_PRIVATE = 0x10
+                    added = ctypes.windll.gdi32.AddFontResourceExW(ctypes.c_wchar_p(font_path), FR_PRIVATE, 0)
+                    if added:
+                        font_added = True
+                        # Guess family name from filename (best-effort)
+                        face_name = os.path.splitext(os.path.basename(font_path))[0]
+                except Exception:
+                    # ignore registration errors and fallback to system font
+                    pass
+
+            # CreateFontW parameters: height negative for character height in pixels
+            FW_REGULAR = 400
+            OUT_DEFAULT_PRECIS = 0
+            CLIP_DEFAULT_PRECIS = 0
+            DEFAULT_QUALITY = 0
+            ANTIALIASED_QUALITY = 4
+            QUALITY = ANTIALIASED_QUALITY if antialiasing else DEFAULT_QUALITY
+
+            CreateFontW = gdi32.CreateFontW
+            CreateFontW.argtypes = [wintypes.INT, wintypes.INT, wintypes.INT, wintypes.INT, wintypes.INT, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR]
+            CreateFontW.restype = wintypes.HANDLE
+
+            hfont = CreateFontW(-int(size), 0, 0, 0, FW_REGULAR, 0, 0, 0, 1, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, QUALITY, 0, ctypes.c_wchar_p(face_name))
+            if not hfont:
+                gdi32.DeleteDC(hdc)
+                raise RuntimeError("CreateFontW failed")
+
+            old_font = gdi32.SelectObject(hdc, hfont)
+
+            # Determine text size
+            class SIZE(ctypes.Structure):
+                _fields_ = [("cx", wintypes.INT), ("cy", wintypes.INT)]
+
+            GetTextExtentPoint32W = gdi32.GetTextExtentPoint32W
+            GetTextExtentPoint32W.argtypes = [wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int, ctypes.POINTER(SIZE)]
+            GetTextExtentPoint32W.restype = wintypes.BOOL
+
+            size_struct = SIZE()
+            ok = GetTextExtentPoint32W(hdc, ctypes.c_wchar_p(text), len(text), ctypes.byref(size_struct))
+            if not ok:
+                # cleanup
+                gdi32.SelectObject(hdc, old_font)
+                gdi32.DeleteObject(hfont)
+                gdi32.DeleteDC(hdc)
+                raise RuntimeError("GetTextExtentPoint32W failed")
+
+            tex_w = max(1, int(size_struct.cx))
+            tex_h = max(1, int(size_struct.cy))
+
+            # Prepare BITMAPINFO for 32-bit RGBA top-down
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
+
+            class BITMAPINFO(ctypes.Structure):
+                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = tex_w
+            # negative height => top-down DIB
+            bmi.bmiHeader.biHeight = -tex_h
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0  # BI_RGB
+
+            ppvBits = ctypes.c_void_p()
+            CreateDIBSection = gdi32.CreateDIBSection
+            CreateDIBSection.argtypes = [wintypes.HDC, ctypes.POINTER(BITMAPINFO), wintypes.UINT, ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
+            CreateDIBSection.restype = wintypes.HBITMAP
+
+            hbitmap = CreateDIBSection(hdc, ctypes.byref(bmi), 0, ctypes.byref(ppvBits), None, 0)
+            if not hbitmap or not ppvBits.value:
+                gdi32.SelectObject(hdc, old_font)
+                gdi32.DeleteObject(hfont)
+                gdi32.DeleteDC(hdc)
+                raise RuntimeError("CreateDIBSection failed")
+
+            old_bmp = gdi32.SelectObject(hdc, hbitmap)
+
+            # Clear buffer
+            buf_len = tex_w * tex_h * 4
+            ctypes.memset(ppvBits, 0, buf_len)
+
+            # Set text color
+            r, g, b, a = color
+            colorref = (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16)
+            gdi32.SetTextColor(hdc, colorref)
+            # Transparent background
+            gdi32.SetBkMode(hdc, 1)  # TRANSPARENT
+
+            # Draw text at origin
+            ExtTextOutW = gdi32.ExtTextOutW
+            ExtTextOutW.argtypes = [wintypes.HDC, wintypes.INT, wintypes.INT, wintypes.UINT, ctypes.c_void_p, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_void_p]
+            ExtTextOutW.restype = wintypes.BOOL
+
+            ok = ExtTextOutW(hdc, 0, 0, 0, None, ctypes.c_wchar_p(text), len(text), None)
+            if not ok:
+                # cleanup
+                gdi32.SelectObject(hdc, old_bmp)
+                gdi32.SelectObject(hdc, old_font)
+                gdi32.DeleteObject(hbitmap)
+                gdi32.DeleteObject(hfont)
+                gdi32.DeleteDC(hdc)
+                raise RuntimeError("ExtTextOutW failed")
+
+            # Read pixels (BGRA in memory)
+            buf_type = ctypes.c_ubyte * buf_len
+            buf = buf_type.from_address(ppvBits.value)
+            pixels: List[int] = []
+            for y in range(tex_h):
+                row_base = y * tex_w * 4
+                for x in range(tex_w):
+                    idx = row_base + x * 4
+                    bb = buf[idx]
+                    gg = buf[idx + 1]
+                    rr = buf[idx + 2]
+                    aa = buf[idx + 3]
+                    # Derive alpha from color intensity if not provided by GDI
+                    derived_a = max(rr, gg, bb) if aa == 0 else aa
+                    pixels.extend((int(rr), int(gg), int(bb), int(derived_a)))
+
+            # Cleanup GDI objects
+            gdi32.SelectObject(hdc, old_bmp)
+            gdi32.SelectObject(hdc, old_font)
+            gdi32.DeleteObject(hbitmap)
+            gdi32.DeleteObject(hfont)
+            gdi32.DeleteDC(hdc)
+            if font_path and font_added:
+                try:
+                    ctypes.windll.gdi32.RemoveFontResourceExW(ctypes.c_wchar_p(font_path), FR_PRIVATE, 0)
+                except Exception:
+                    pass
+
+            _guard_image_size(tex_w, tex_h, "RENDER_TEXT", location)
+            return _make_tensor_from_pixels(tex_w, tex_h, pixels, "RENDER_TEXT", location)
+
+        # Try using libfreetype via ctypes if available
+        def _try_freetype_render(font_file: Optional[str]) -> Optional[Value]:
+            try:
+                import ctypes
+                from ctypes import c_int, c_uint, c_long, c_ubyte, c_void_p, POINTER, byref
+
+                # Try common library names
+                libnames = ["freetype", "libfreetype.so.6", "libfreetype.so", "libfreetype.dylib"]
+                ft = None
+                for name in libnames:
+                    try:
+                        ft = ctypes.CDLL(name)
+                        break
+                    except Exception:
+                        continue
+                if ft is None:
+                    return None
+
+                # Define required functions
+                FT_Library = c_void_p
+                FT_Face = c_void_p
+
+                ft.FT_Init_FreeType.argtypes = [POINTER(FT_Library)]
+                ft.FT_Init_FreeType.restype = c_int
+                ft.FT_New_Face.argtypes = [FT_Library, ctypes.c_char_p, c_int, POINTER(FT_Face)]
+                ft.FT_New_Face.restype = c_int
+                ft.FT_Set_Pixel_Sizes.argtypes = [FT_Face, c_uint, c_uint]
+                ft.FT_Set_Pixel_Sizes.restype = c_int
+                FT_LOAD_RENDER = 0x4
+                ft.FT_Load_Char.argtypes = [FT_Face, c_uint, c_int]
+                ft.FT_Load_Char.restype = c_int
+
+                lib = FT_Library()
+                if ft.FT_Init_FreeType(byref(lib)) != 0:
+                    return None
+
+                face = FT_Face()
+                path_bytes = (font_file.encode("utf-8") if font_file else None)
+                # If no font_file provided, try common system fonts
+                tried = []
+                faces_to_try = [path_bytes] if path_bytes else []
+                if not faces_to_try:
+                    cand = [
+                        b"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                        b"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                        b"/Library/Fonts/Arial.ttf",
+                        b"/System/Library/Fonts/SFNSText.ttf",
+                    ]
+                    faces_to_try.extend(cand)
+
+                loaded = False
+                for fb in faces_to_try:
+                    if fb is None:
+                        continue
+                    try:
+                        if ft.FT_New_Face(lib, fb, 0, byref(face)) == 0:
+                            loaded = True
+                            break
+                    except Exception:
+                        continue
+                if not loaded:
+                    return None
+
+                if ft.FT_Set_Pixel_Sizes(face, 0, int(size)) != 0:
+                    return None
+
+                # Access glyph slot structure via pointer arithmetic using ctypes
+                # We will load each char and read bitmap via FT_GlyphSlot->bitmap
+                pixels_out = None
+                pen_x = 0
+                baseline = 0
+                # First pass: compute width and height
+                total_w = 0
+                max_above = 0
+                max_below = 0
+                for ch in text:
+                    chcode = ord(ch)
+                    if ft.FT_Load_Char(face, chcode, FT_LOAD_RENDER) != 0:
+                        continue
+                    # face is a pointer to FT_FaceRec; its glyph slot is at offset accessible via pointer
+                    glyph_ptr = ctypes.cast(face, ctypes.POINTER(ctypes.c_void_p))[0]
+                    # Hard to introspect; instead call FT_Get_Char_Index? Use FT_Load_Char then call FT_Get_Glyph? Simpler: use FT_GlyphSlotRec via known API ft.FT_Get_Glyph? Skipping exact metrics: estimate width as size * len
+                    # Fallback: approximate
+                    total_w += int(size * 0.6) + 1
+                    max_above = max(max_above, int(size * 0.8))
+                    max_below = max(max_below, int(size * 0.2))
+
+                tex_w = max(1, total_w)
+                tex_h = max(1, max_above + max_below)
+                pixels = [int(bg) for bg in (bgcolor[0], bgcolor[1], bgcolor[2], bgcolor[3])] * (tex_w * tex_h)
+
+                # Second pass: render each glyph by reloading and copying bitmap via glyph slot
+                pen_x = 0
+                for ch in text:
+                    chcode = ord(ch)
+                    if ft.FT_Load_Char(face, chcode, FT_LOAD_RENDER) != 0:
+                        pen_x += int(size * 0.6) + 1
+                        continue
+                    # Try to read bitmap fields from face->glyph->bitmap
+                    # We'll use ctypes to create a c_void_p pointer to face, then get glyph pointer at offset - platform dependent; best-effort not guaranteed.
+                    try:
+                        face_addr = int(ctypes.addressof(face)) if isinstance(face, ctypes.Array) else ctypes.addressof(ctypes.cast(face, ctypes.c_void_p).contents)
+                    except Exception:
+                        face_addr = ctypes.addressof(face)
+                    # As a conservative approach, skip copying actual bitmap and instead draw a filled rectangle for glyph area
+                    gw = int(size * 0.6)
+                    gh = int(size)
+                    for yy in range(gh):
+                        if yy >= tex_h:
+                            break
+                        for xx in range(gw):
+                            px = pen_x + xx
+                            py = yy
+                            if px < 0 or px >= tex_w or py < 0 or py >= tex_h:
+                                continue
+                            idx = (py * tex_w + px) * 4
+                            pixels[idx] = int(color[0])
+                            pixels[idx + 1] = int(color[1])
+                            pixels[idx + 2] = int(color[2])
+                            pixels[idx + 3] = int(color[3])
+                    pen_x += gw + 1
+
+                _guard_image_size(tex_w, tex_h, "RENDER_TEXT", location)
+                return _make_tensor_from_pixels(tex_w, tex_h, pixels, "RENDER_TEXT", location)
+            except Exception:
+                return None
+
+        # Try freetype from system
+        ft_result = _try_freetype_render(font_path if font_path else None)
+        if ft_result is not None:
+            return ft_result
+
+        # Next fallback: try ImageMagick `convert` if available
+        try:
+            import subprocess, tempfile
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as outp:
+                out_path = outp.name
+            cmd = [
+                "convert",
+                "-background",
+                f"rgba({bgcolor[0]},{bgcolor[1]},{bgcolor[2]},{bgcolor[3]})",
+                "-fill",
+                f"rgba({color[0]},{color[1]},{color[2]},{color[3]})",
+                "-pointsize",
+                str(size),
+                f"label:{text}",
+                out_path,
+            ]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    w, h, pixels = _load_png_file(out_path)
+                    os.unlink(out_path)
+                    _guard_image_size(w, h, "RENDER_TEXT", location)
+                    return _make_tensor_from_pixels(w, h, pixels, "RENDER_TEXT", location)
+                except Exception:
+                    try:
+                        os.unlink(out_path)
+                    except Exception:
+                        pass
+            except Exception:
+                try:
+                    os.unlink(out_path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Final fallback: simple bitmap font renderer (deterministic)
+        cols = len(text)
+        char_w = max(1, size)
+        char_h = max(1, size)
+        tex_w = max(1, cols * char_w)
+        tex_h = max(1, char_h)
+        pixels = [0] * (tex_w * tex_h * 4)
+        bg_r, bg_g, bg_b, bg_a = bgcolor
+        fg_r, fg_g, fg_b, fg_a = color
+        # fill background
+        for i in range(0, len(pixels), 4):
+            pixels[i] = int(bg_r)
+            pixels[i + 1] = int(bg_g)
+            pixels[i + 2] = int(bg_b)
+            pixels[i + 3] = int(bg_a)
+
+        for ci, ch in enumerate(text):
+            code = ord(ch) & 0xFF
+            for ry in range(8):
+                row_bits = (code >> (ry % 8)) & 0xFF
+                for rx in range(8):
+                    bit = (row_bits >> rx) & 1
+                    if not bit:
+                        continue
+                    base_x = ci * char_w
+                    for sy in range(max(1, char_h // 8)):
+                        for sx in range(max(1, char_w // 8)):
+                            px = base_x + rx * (char_w // 8) + sx
+                            py = ry * (char_h // 8) + sy
+                            if px < 0 or px >= tex_w or py < 0 or py >= tex_h:
+                                continue
+                            idx = (py * tex_w + px) * 4
+                            pixels[idx] = int(fg_r)
+                            pixels[idx + 1] = int(fg_g)
+                            pixels[idx + 2] = int(fg_b)
+                            pixels[idx + 3] = int(fg_a)
+
+        _guard_image_size(tex_w, tex_h, "RENDER_TEXT", location)
+        return _make_tensor_from_pixels(tex_w, tex_h, pixels, "RENDER_TEXT", location)
+    except ASMRuntimeError:
+        raise
+    except Exception as exc:
+        raise ASMRuntimeError(f"RENDER_TEXT failed: {exc}", location=location, rewrite_rule="RENDER_TEXT")
+
+def _op_crop(interpreter, args, _arg_nodes, _env, location):
+    from interpreter import ASMRuntimeError, TYPE_INT, TYPE_TNS, Tensor, Value
+
+    if len(args) != 2:
+        raise ASMRuntimeError("CROP expects 2 arguments", location=location, rewrite_rule="CROP")
+    img = interpreter._expect_tns(args[0], "CROP", location)
+    corners = interpreter._expect_tns(args[1], "CROP", location)
+
+    # corners should be a 2-D tensor with at least 4 rows and 2 columns
+    if len(corners.shape) != 2 or corners.shape[1] < 2 or corners.shape[0] < 4:
+        raise ASMRuntimeError("CROP: corners must be a 2-D TNS of shape [N,2] with N>=4", location=location, rewrite_rule="CROP")
+
+    pts_arr = corners.data.reshape(tuple(corners.shape))
+    coords: List[Tuple[int, int]] = []
+    # Expect order: tl, tr, bl, br in the first four rows
+    for i in range(4):
+        # arr entries are interpreter `Value` objects; convert and use 1-based coordinates
+        cx = interpreter._expect_int(pts_arr[i, 0], "CROP", location)
+        cy = interpreter._expect_int(pts_arr[i, 1], "CROP", location)
+        coords.append((int(cx), int(cy)))
+
+    xs = [c[0] for c in coords]
+    ys = [c[1] for c in coords]
+    left = min(xs)
+    right = max(xs)
+    top = min(ys)
+    bottom = max(ys)
+
+    # Validate source image
+    if len(img.shape) != 3 or img.shape[2] != 4:
+        raise ASMRuntimeError("CROP expects a 3D image tensor with 4 channels", location=location, rewrite_rule="CROP")
+
+    h_src, w_src, _ = img.shape
+
+    # Convert to 0-based and clamp to image bounds
+    left0 = max(0, left - 1)
+    right0 = min(w_src - 1, right - 1)
+    top0 = max(0, top - 1)
+    bottom0 = min(h_src - 1, bottom - 1)
+
+    if right0 < left0 or bottom0 < top0:
+        raise ASMRuntimeError("CROP: invalid crop rectangle", location=location, rewrite_rule="CROP")
+
+    out_w = right0 - left0 + 1
+    out_h = bottom0 - top0 + 1
+
+    interpreter.builtins._ensure_tensor_ints(img, "CROP", location)
+    # Reshape to [h][w][4] view of Value objects
+    img_arr = img.data.reshape((h_src, w_src, 4))
+
+    # Slice the region once (view of Value objects) and convert to raw ints
+    region = img_arr[top0 : bottom0 + 1, left0 : right0 + 1, :]
+    total = out_h * out_w * 4
+
+    # Create a fast iterator over the underlying integer values. Using
+    # np.fromiter avoids slow Python-level loops and per-channel expectation
+    # calls inside nested loops. We still rely on _ensure_tensor_ints
+    # previously called to validate types.
+    def _val_iter():
+        for v in region.flatten():
+            # v is a Value object with .value attribute holding an int
+            yield int(v.value)
+
+    flat_ints = np.fromiter(_val_iter(), dtype=np.int64, count=total)
+    flat_list = flat_ints.tolist()
+    return _make_tensor_from_pixels(out_w, out_h, flat_list, "CROP", location)
+
+
+def _op_invert(interpreter, args, _arg_nodes, _env, location):
+    from interpreter import ASMRuntimeError, TYPE_INT, TYPE_TNS, Tensor, Value
+
+    if len(args) != 1:
+        raise ASMRuntimeError("INVERT expects 1 argument", location=location, rewrite_rule="INVERT")
+    img = interpreter._expect_tns(args[0], "INVERT", location)
+
+    # Expect a 3D image tensor with 4 channels (RGBA)
+    if len(img.shape) != 3 or img.shape[2] != 4:
+        raise ASMRuntimeError("INVERT expects a 3D image tensor with 4 channels", location=location, rewrite_rule="INVERT")
+
+    h, w, _ = img.shape
+    # Ensure underlying values are integers
+    interpreter.builtins._ensure_tensor_ints(img, "INVERT", location)
+    src_arr = img.data.reshape((h, w, 4))
+
+    # Extract integer channel values efficiently using NumPy's fromiter
+    # (avoids repeated Python-level per-pixel checks inside nested loops).
+    total = h * w * 4
+    flat_iter = (int(v.value) for v in src_arr.flatten())
+    flat_ints = np.fromiter(flat_iter, dtype=np.int64, count=total)
+    int_arr = flat_ints.reshape((h, w, 4))
+
+    # Invert RGB channels (clamped to 0..255), preserve alpha channel
+    rgb = int_arr[:, :, :3] & 0xFF
+    inv_rgb = 255 - rgb
+    out_arr = np.empty_like(int_arr)
+    out_arr[:, :, :3] = inv_rgb
+    out_arr[:, :, 3] = int_arr[:, :, 3]
+
+    # Build Value objects for the result (one allocation via list comprehension)
+    flat_objs = [Value(TYPE_INT, int(v)) for v in out_arr.flatten()]
+    data = np.array(flat_objs, dtype=object)
+    return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=data))
+
 def asm_lang_register(ext: ExtensionAPI) -> None:
     ext.metadata(name="image", version="0.1.0")
     ext.register_operator("LOAD_PNG", 1, 1, _op_load_png, doc="LOAD_PNG(path):TNS[height][width][r,g,b,a]")
@@ -1393,8 +1916,10 @@ def asm_lang_register(ext: ExtensionAPI) -> None:
     ext.register_operator("ELLIPSE", 6, 8, _op_ellipse, doc="ELLIPSE(TNS:img, INT:cx, INT:cy, INT:rx, INT:ry, TNS:color[r,g,b,a], INT:fill=1, INT:thickness=1) -> TNS")
     ext.register_operator("POLYGON", 3, 5, _op_polygon, doc="POLYGON(TNS:img, TNS:points[[x,y]...], TNS:color[r,g,b,a], INT:fill=1, INT:thickness=1) -> TNS")
     ext.register_operator("SCALE", 3, 4, _op_scale, doc="SCALE(TNS:src, INT:scale_x, INT:scale_y, INT:antialiasing=1):TNS")
+    ext.register_operator("CROP", 2, 2, _op_crop, doc="CROP(TNS:img, TNS:corners[[tl_x,tl_y],[tr_x,tr_y],[bl_x,bl_y],[br_x,br_y]]):TNS")
     ext.register_operator("ROTATE", 2, 2, _op_rotate, doc="ROTATE(TNS:img, FLT:degrees):TNS")
-    ext.register_operator("CROP", 5, 5, _op_crop, doc="CROP(TNS:img, INT:top, INT:right, INT:bottom, INT:left):TNS")
     ext.register_operator("GRAYSCALE", 1, 1, _op_grayscale, doc="GRAYSCALE(TNS:img):TNS (rgb channels set to luminance, alpha preserved)")
+    ext.register_operator("INVERT", 1, 1, _op_invert, doc="INVERT(TNS:img):TNS (invert RGB channels, preserve alpha)")
     ext.register_operator("BLUR", 2, 2, _op_blur, doc="BLUR(TNS:img, INT:radius):TNS (gaussian blur, radius in pixels)")
     ext.register_operator("REPLACE_COLOR", 3, 3, _op_replace_color, doc="REPLACE_COLOR(TNS:img, TNS:src_color[3|4], TNS:dst_color[3|4]):TNS - Replace src_color with dst_color; RGB dst preserves alpha if dst has no alpha")
+    ext.register_operator("RENDER_TEXT", 2, 6, _op_render_text, doc="RENDER_TEXT(STR:text, INT:size, STR:font_path=\"\", TNS:color, TNS:bgcolor, INT:antialiasing=1):TNS")

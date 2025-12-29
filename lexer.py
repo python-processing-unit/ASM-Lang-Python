@@ -21,7 +21,7 @@ class Token:
 
 KEYWORDS = {
     "IF",
-    "ELSIF",
+    "ELSEIF",
     "ELSE",
     "WHILE",
     "FOR",

@@ -124,8 +124,13 @@ def asm_lang_register(ext: ExtensionAPI) -> None:
         except AttributeError as exc:
             raise ASMExtensionError(f"Function {func_name} not found in {dll_name}: {exc}")
 
-        # Parse arg types
-        arg_codes = [c.strip() for c in str(arg_types_raw).split(",") if c.strip()]
+        # Parse arg types. Accept either comma-separated codes ("P,S,I")
+        # or a contiguous string of single-letter codes ("PSSSI").
+        raw_codes = str(arg_types_raw)
+        if "," in raw_codes:
+            arg_codes = [c.strip() for c in raw_codes.split(",") if c.strip()]
+        else:
+            arg_codes = [c for c in raw_codes if c.strip()]
 
         py_args = []
         for i, code in enumerate(arg_codes):

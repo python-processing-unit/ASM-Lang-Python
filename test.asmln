@@ -64,11 +64,15 @@ FUNC STDLIB_TESTS():INT{
 
     # Path library tests
     ASSERT( EQ(path.NORMALIZE_PATH("a\b\c"), "a/b/c") )
+    ASSERT( EQ(path.WINPATH("a/b/c"), "a\b\c") )
     ASSERT( EQ(path.BASENAME("a/b/c.txt"), "c.txt") )
     ASSERT( EQ(path.EXTNAME("foo.bar"), "bar") )
     ASSERT( EQ(path.DELEXT("foo.bar"), "foo") )
     ASSERT( EQ(path.EXTNAME("foo"), "") )
     ASSERT( EQ(path.DELEXT("foo"), "foo") )
+    IF(EQ(OS(),"win")){
+        ASSERT( EQ(path.TEMPFILE("myfile.txt"), "C:/Windows/Temp/myfile.txt") )
+    }
 
     PRINT("Path library tests passed.")
 
@@ -197,6 +201,10 @@ FUNC STDLIB_TESTS():INT{
     DEL(bmp_path)
     TNS: png = image.LOAD_PNG(png_path)
     DEL(png_path)
+    # Convenience loader (auto-detect)
+    TNS: auto_png = image.LOAD_IMG(JOIN(path.interpreter_dir, "/icon.png"))
+    ASSERT(EQ(auto_png, png))
+    DEL(auto_png)
     image.LOAD_JPEG(jpeg_path)
     DEL(jpeg_path)
     ASSERT(EQ(bmp, png))
@@ -216,6 +224,20 @@ FUNC STDLIB_TESTS():INT{
 
     # Double-invert returns original
     ASSERT(EQ(image.INVERT(image.INVERT(bmp)), bmp))
+
+    # REPLACE_COLOR: draw a filled rect and replace red with green
+    TNS: canvas_rc = TNS([1011,1011,100], 0)
+    TNS: redcol = [11111111, 0, 0, 11111111]
+    TNS: greencol = [0, 11111111, 0, 11111111]
+    TNS: filled_rc = image.FILL_RECT(canvas_rc, 1, 1, 1011, 1011, redcol)
+    DEL(canvas_rc)
+    TNS: replaced = image.REPLACE_COLOR(filled_rc, redcol, greencol)
+    DEL(redcol)
+    DEL(greencol)
+    DEL(filled_rc)
+    ASSERT(EQ(image.R(replaced, 1, 1), 0))
+    ASSERT(EQ(image.G(replaced, 1, 1), 11111111))
+    DEL(replaced)
 
     # Scale (identity) preserves dimensions
     TNS: scaled = image.SCALE(bmp, 1, 1, 1)
@@ -291,8 +313,13 @@ FUNC STDLIB_TESTS():INT{
     ASSERT(LTE(db, 11))
     DEL(db)
 
-    # CROP with zeros returns identical image
-    TNS: crop_same = image.CROP(bmp, 0, 0, 0, 0)
+    # CROP with zeros returns identical image (new signature: corners tensor)
+    TNS: crop_same = image.CROP(bmp, [ ^
+        [1, 1], ^
+        [TLEN(bmp, 10), 1], ^
+        [1, TLEN(bmp, 1)], ^
+        [TLEN(bmp, 10), TLEN(bmp, 1)] ^
+    ])
     ASSERT(EQ(crop_same, bmp))
     DEL(crop_same)
 

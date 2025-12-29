@@ -291,7 +291,7 @@ class Parser:
         condition: Expression = self._parse_parenthesized_expression()
         then_block: Block = self._parse_block()
         elifs: List[IfBranch] = []
-        while self._match("ELSIF"):
+        while self._match("ELSEIF"):
             cond: Expression = self._parse_parenthesized_expression()
             block: Block = self._parse_block()
             elifs.append(IfBranch(condition=cond, block=block))

@@ -5,6 +5,7 @@
 # LOAD_PNG(STR: path):TNS[height,width,[r,g,b,a]]
 # LOAD_JPEG(STR: path):TNS[height,width,[r,g,b,a]]
 # LOAD_BMP(STR: path):TNS[height,width,[r,g,b,a]]
+# LOAD_IMG(STR: path):TNS[height,width,[r,g,b,a]]  # auto-detects format by extension
 # SAVE_PNG(TNS: img, STR: path, INT: compression_level)
 # SAVE_JPEG(TNS: img, STR: path, INT: compression_level)
 # SAVE_BMP(TNS: img, STR: path)
@@ -25,16 +26,32 @@
 # FLIP_H(TNS: img):TNS
 # INVERT(TNS: img):TNS
 # SCALE(TNS: src, INT: scale_x, INT: scale_y, INT: antialiasing = 1):TNS
-# CROP(TNS: img, INT: tl, INT: tr, INT: bl, INT: br):TNS
+# CROP(TNS:img, TNS:corners[[tl_x,tl_y],[tr_x,tr_y],[bl_x,bl_y],[br_x,br_y]]):TNS
 # ROTATE(TNS: img, FLT: degrees):TNS
 # BLIT(TNS: src, TNS: dest, INT: x, INT: y, INT: mixalpha = 1):TNS
 # GRAYSCALE(TNS: img):TNS  # three-channel grayscale (rgb=luminance, alpha preserved)
 # REPLACE_COLOR(TNS: img, TNS: target_color, TNS: replacement_color):TNS
 # BLUR(TNS: img, INT: radius):TNS  # gaussian blur with integer radius
-# SHOW(TNS: img, STR: window):INT  # saves to temp file and opens with default viewer (Windows only)
+# SHOW(TNS: img):INT  # saves to temp file and opens with default viewer (Windows only)
 #
 # The returned tensor layout is [row][column][channel] with 1-based indexing
 # in user code. Channels are ordered r,g,b,a and values are 0..255.
+
+IMPORT(path)
+
+FUNC LOAD_IMG(STR: img_path):TNS{
+    STR: ext = path.EXTNAME(img_path)
+    IF(EQ(ext, "png")){
+        RETURN(image.LOAD_PNG(img_path))
+    } ELSEIF (OR(EQ(ext, "jpg"),EQ(ext, "jpeg"))){
+        RETURN(image.LOAD_JPEG(img_path))
+    } ELSEIF (EQ(ext, "bmp")){
+        RETURN(image.LOAD_BMP(img_path))
+    } ELSE {
+        PRINT("Unsupported image format: ",ext)
+        ASSERT(0)
+    }
+}
 
 FUNC WIDTH(TNS: img):INT{
     RETURN(TLEN(img, 10))
@@ -76,34 +93,6 @@ FUNC FLIP_H(TNS: img):TNS{
     RETURN(TFLIP(img, 10))
 }
 
-FUNC INVERT(TNS: img):TNS{
-    TNS: shape = SHAPE(img)
-    INT: h = HEIGHT(img)
-    INT: w = WIDTH(img)
-    # Create an output tensor with the same shape, initialized to 0
-    TNS: out = TNS(shape, 0)
-    DEL(shape)
-    FOR(y, h){
-        FOR(x, w){
-            INT: r = R(img, x, y)
-            INT: g = G(img, x, y)
-            INT: b = B(img, x, y)
-            INT: a = A(img, x, y)
-            out[y,x,1] = SUB(11111111, r)
-            out[y,x,10] = SUB(11111111, g)
-            out[y,x,11] = SUB(11111111, b)
-            out[y,x,100] = a
-        }
-    }
-    DEL(h)
-    DEL(w)
-    DEL(r)
-    DEL(g)
-    DEL(b)
-    DEL(a)
-    POP(out)
-}
-
 FUNC RECT(TNS: img, INT: x, INT: y, INT: width, INT: height, TNS: color, INT: fill, INT: thickness):TNS{
     TNS: pts = [ ^
         [x, y], ^
@@ -135,12 +124,13 @@ FUNC CIRCLE(TNS: img, TNS: center, INT: radius, TNS: color, INT: fill, INT: thic
     RETURN(image.ELLIPSE(img, center, radius, radius, color, fill, thickness))
 }
 
-FUNC SHOW(TNS: img, STR: window):INT{
+FUNC SHOW(TNS: img):INT{
     # Save the image to the provided path and open it with the system default
-    # viewer on Windows. `window` is treated as the target file path.
-    SAVE_PNG(img, window, 0)
+    # viewer on Windows. `img_path` is treated as the target file path.
+    STR: img_path = "C:/Windows/Temp/tmp_img.png"
+    image.SAVE_PNG(img, img_path, 0)
     # ShellExecuteW(hwnd, operation, file, params, dir, showcmd)
     # Use NULL hwnd (0), operation "open", empty params and dir, showcmd=1
-    win32.WIN_CALL("shell32", "ShellExecuteW", "PSSSSI", "P", 0, "open", window, "", "", 1)
+    win32.WIN_CALL("shell32", "ShellExecuteW", "PSSSSI", "P", 0, "open", img_path, "", "", 1)
     RETURN(0)
 }

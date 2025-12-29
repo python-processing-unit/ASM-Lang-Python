@@ -16,6 +16,10 @@ FUNC NORMALIZE_PATH(STR: path):STR{
     RETURN(REPLACE(path,"\","/"))
 }
 
+FUNC WINPATH(STR: path):STR{
+    RETURN(REPLACE(path,"/","\"))
+}
+
 FUNC BASEPATH(STR: path):STR{ # returns directory portion of path
     STR: npath = NORMALIZE_PATH(path)
     STR: base = BASENAME(npath)
@@ -71,6 +75,18 @@ FUNC EXTNAME(STR: path):STR{ # returns extension portion of path
 
 FUNC DELEXT(STR: path):STR{ # returns path without extension
     RETURN(SPLITEXT(path)[1])
+}
+
+FUNC TEMPFILE(STR: local_path):STR{
+    IF(EQ(OS(),"win")){
+        STR: temp = "C:/Windows/Temp/"
+    } ELSE {
+        PRINT("TEMPFILE not implemented for ", OS())
+        ASSERT(0)
+    }
+    STR: final_path = JOIN(temp, local_path)
+    DEL(temp)
+    POP(final_path)
 }
 
 STR: interpreter = ARGV()[1]
