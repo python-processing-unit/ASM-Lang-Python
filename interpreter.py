@@ -28,6 +28,8 @@ from parser import (
     GotopointStatement,
     Identifier,
     IndexExpression,
+    Range,
+    Star,
     IfBranch,
     IfStatement,
     Literal,
@@ -2924,12 +2926,60 @@ class Interpreter:
             assert isinstance(base_val.value, Tensor)
             eval_expr = self._evaluate_expression
             expect_int = self._expect_int
-            indices: List[int] = []
-            indices_append = indices.append
-            for node in index_nodes:
-                indices_append(expect_int(eval_expr(node, env), "ASSIGN", statement.location))
+            # Check if any index is a Range (slice). If none, mutate a single
+            # element as before. If ranges present, perform a slice assignment.
+            has_range = any(isinstance(n, (Range, Star)) for n in index_nodes)
+            if not has_range:
+                indices: List[int] = []
+                indices_append = indices.append
+                for node in index_nodes:
+                    indices_append(expect_int(eval_expr(node, env), "ASSIGN", statement.location))
+                new_value = self._evaluate_expression(statement.value, env)
+                self._mutate_tensor_value(base_val.value, indices, new_value, statement.location)
+                return
+
+            # Slice assignment path
+            arr = base_val.value.data.reshape(tuple(base_val.value.shape))
+            indexers: List[object] = []
+            for dim, node in enumerate(index_nodes):
+                if isinstance(node, Range):
+                    lo_val = expect_int(eval_expr(node.lo, env), "ASSIGN", statement.location)
+                    hi_val = expect_int(eval_expr(node.hi, env), "ASSIGN", statement.location)
+                    lo_res = self._resolve_tensor_index(lo_val, base_val.value.shape[dim], "ASSIGN", statement.location)
+                    hi_res = self._resolve_tensor_index(hi_val, base_val.value.shape[dim], "ASSIGN", statement.location)
+                    indexers.append(slice(lo_res - 1, hi_res))
+                else:
+                    raw = expect_int(eval_expr(node, env), "ASSIGN", statement.location)
+                    idx_res = self._resolve_tensor_index(raw, base_val.value.shape[dim], "ASSIGN", statement.location)
+                    indexers.append(idx_res - 1)
+
+            sel = arr[tuple(indexers)]
+            # Evaluate RHS and ensure it's a tensor of matching shape
             new_value = self._evaluate_expression(statement.value, env)
-            self._mutate_tensor_value(base_val.value, indices, new_value, statement.location)
+            if new_value.type != TYPE_TNS:
+                raise ASMRuntimeError("Slice assignment requires tensor value", location=statement.location, rewrite_rule="ASSIGN")
+            assert isinstance(new_value.value, Tensor)
+            sel_shape = list(np.array(sel, dtype=object).shape)
+            if sel_shape != new_value.value.shape:
+                raise ASMRuntimeError("Slice assignment shape mismatch", location=statement.location, rewrite_rule="ASSIGN")
+
+            # Elementwise type check then mutate in place
+            sel_view = np.array(sel, dtype=object)
+            new_flat = new_value.value.data.ravel()
+            if sel_view.size != new_flat.size:
+                raise ASMRuntimeError("Slice assignment size mismatch", location=statement.location, rewrite_rule="ASSIGN")
+            # Verify element type compatibility
+            for i in range(sel_view.size):
+                cur = sel_view.ravel()[i]
+                newv = new_flat[i]
+                if cur.type != newv.type:
+                    raise ASMRuntimeError("Tensor element type mismatch", location=statement.location, rewrite_rule="ASSIGN")
+            # Perform mutation on the original array view
+            # Use flat indexing into the original view to preserve object identity
+            target_view = arr[tuple(indexers)]
+            # Assign element-wise
+            for i in range(new_flat.size):
+                target_view.flat[i] = new_flat[i]
             return
         if isinstance(statement, ExpressionStatement):
             self._evaluate_expression(statement.expression, env)
@@ -3269,12 +3319,49 @@ class Interpreter:
             assert isinstance(base_val.value, Tensor)
             eval_expr = self._evaluate_expression
             expect_int = self._expect_int
-            indices: List[int] = []
-            indices_append = indices.append
-            for idx_node in index_nodes:
-                indices_append(expect_int(eval_expr(idx_node, env), "INDEX", expression.location))
-            offset = self._tensor_flat_index(base_val.value, indices, "INDEX", expression.location)
-            return base_val.value.data[offset]
+            # Determine if any index is a range (slice) or star. If none,
+            # behave as before and return a single element. If any ranges
+            # or stars present, construct numpy slicing indices and return
+            # a Tensor.
+            has_range = any(isinstance(n, (Range, Star)) for n in index_nodes)
+            if not has_range:
+                indices: List[int] = []
+                indices_append = indices.append
+                for idx_node in index_nodes:
+                    indices_append(expect_int(eval_expr(idx_node, env), "INDEX", expression.location))
+                offset = self._tensor_flat_index(base_val.value, indices, "INDEX", expression.location)
+                return base_val.value.data[offset]
+
+            # Build numpy indexers (mix of ints and slices). Resolve 1-based
+            # indices into 0-based python indices; ranges are inclusive.
+            arr = base_val.value.data.reshape(tuple(base_val.value.shape))
+            indexers: List[object] = []
+            for dim, node in enumerate(index_nodes):
+                if isinstance(node, Range):
+                    lo_val = expect_int(eval_expr(node.lo, env), "INDEX", expression.location)
+                    hi_val = expect_int(eval_expr(node.hi, env), "INDEX", expression.location)
+                    # validate both endpoints
+                    lo_res = self._resolve_tensor_index(lo_val, base_val.value.shape[dim], "INDEX", expression.location)
+                    hi_res = self._resolve_tensor_index(hi_val, base_val.value.shape[dim], "INDEX", expression.location)
+                    # convert to 0-based slice: start = lo_res-1, stop = hi_res (exclusive)
+                    indexers.append(slice(lo_res - 1, hi_res))
+                elif type(node).__name__ == "Star":
+                    # Full-dimension slice `*` selects the entire axis
+                    indexers.append(slice(None, None))
+                else:
+                    raw = expect_int(eval_expr(node, env), "INDEX", expression.location)
+                    idx_res = self._resolve_tensor_index(raw, base_val.value.shape[dim], "INDEX", expression.location)
+                    indexers.append(idx_res - 1)
+
+            sel = arr[tuple(indexers)]
+            sel_arr = np.array(sel, dtype=object)
+            # Ensure sel_arr is at least 1-D (slices guarantee at least one dim)
+            if sel_arr.ndim == 0:
+                # Single element selected despite slice usage; wrap as 1-element tensor
+                sel_arr = sel_arr.reshape((1,))
+            out_shape = list(sel_arr.shape)
+            out_data = sel_arr.ravel()
+            return Value(TYPE_TNS, Tensor(shape=out_shape, data=out_data))
         if isinstance(expression, Identifier):
             found = env.get_optional(expression.name)
             if found is not None:

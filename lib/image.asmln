@@ -2,9 +2,9 @@
 # Backed by ext/image.py (stdlib-only, prefers Windows GDI+).
 #
 # API (operators provided by the model/extension):
-# LOAD_PNG(STR: path):TNS[height,width,[r,g,b,a]]
-# LOAD_JPEG(STR: path):TNS[height,width,[r,g,b,a]]
-# LOAD_BMP(STR: path):TNS[height,width,[r,g,b,a]]
+# LOAD_PNG(STR: path):TNS[width,height,[r,g,b,a]]
+# LOAD_JPEG(STR: path):TNS[width,height,[r,g,b,a]]
+# LOAD_BMP(STR: path):TNS[width,height,[r,g,b,a]]
 # LOAD_IMG(STR: path):TNS[height,width,[r,g,b,a]]  # auto-detects format by extension
 # SAVE_PNG(TNS: img, STR: path, INT: compression_level)
 # SAVE_JPEG(TNS: img, STR: path, INT: compression_level)
@@ -17,11 +17,15 @@
 # WIDTH(TNS: img):INT
 # HEIGHT(TNS: img):INT
 # CHANNELS(TNS: img):INT
+# R(TNS: img):TNS
+# G(TNS: img):TNS
+# B(TNS: img):TNS
+# A(TNS: img):TNS
 # PIXEL(TNS: img, INT: x, INT: y):TNS
-# R(TNS: img, INT: x, INT: y):INT
-# G(TNS: img, INT: x, INT: y):INT
-# B(TNS: img, INT: x, INT: y):INT
-# A(TNS: img, INT: x, INT: y):INT
+# PIXEL_R(TNS: img, INT: x, INT: y):INT
+# PIXEL_G(TNS: img, INT: x, INT: y):INT
+# PIXEL_B(TNS: img, INT: x, INT: y):INT
+# PIXEL_A(TNS: img, INT: x, INT: y):INT
 # FLIP_V(TNS: img):TNS
 # FLIP_H(TNS: img):TNS
 # INVERT(TNS: img):TNS
@@ -34,7 +38,7 @@
 # BLUR(TNS: img, INT: radius):TNS  # gaussian blur with integer radius
 # SHOW(TNS: img):INT  # saves to temp file and opens with default viewer (Windows only)
 #
-# The returned tensor layout is [row][column][channel] with 1-based indexing
+# The returned tensor layout is [column][row][channel] (width, height, channel)
 # in user code. Channels are ordered r,g,b,a and values are 0..255.
 
 IMPORT(path)
@@ -54,35 +58,51 @@ FUNC LOAD_IMG(STR: img_path):TNS{
 }
 
 FUNC WIDTH(TNS: img):INT{
-    RETURN(TLEN(img, 10))
+    RETURN(TLEN(img, 1))
 }
 
 FUNC HEIGHT(TNS: img):INT{
-    RETURN(TLEN(img, 1))
+    RETURN(TLEN(img, 10))
 }
 
 FUNC CHANNELS(TNS: img):INT{
     RETURN(TLEN(img, 11))
 }
 
+FUNC R(TNS: img):TNS{
+    RETURN(img[*, *, 1])
+}
+
+FUNC G(TNS: img):TNS{
+    RETURN(img[*, *, 10])
+}
+
+FUNC B(TNS: img):TNS{
+    RETURN(img[*, *, 11])
+}
+
+FUNC A(TNS: img):TNS{
+    RETURN(img[*, *, 100])
+}
+
 FUNC PIXEL(TNS: img, INT: x, INT: y):TNS{
-    RETURN([img[y,x,1], img[y,x,10], img[y,x,11], img[y,x,100]])
+    RETURN(img[x,y,*])
 }
 
-FUNC R(TNS: img, INT: x, INT: y):INT{
-    RETURN(img[y,x,1])
+FUNC PIXEL_R(TNS: img, INT: x, INT: y):INT{
+    RETURN(img[x,y,1])
 }
 
-FUNC G(TNS: img, INT: x, INT: y):INT{
-    RETURN(img[y,x,10])
+FUNC PIXEL_G(TNS: img, INT: x, INT: y):INT{
+    RETURN(img[x,y,10])
 }
 
-FUNC B(TNS: img, INT: x, INT: y):INT{
-    RETURN(img[y,x,11])
+FUNC PIXEL_B(TNS: img, INT: x, INT: y):INT{
+    RETURN(img[x,y,11])
 }
 
-FUNC A(TNS: img, INT: x, INT: y):INT{
-    RETURN(img[y,x,100])
+FUNC PIXEL_A(TNS: img, INT: x, INT: y):INT{
+    RETURN(img[x,y,100])
 }
 
 FUNC FLIP_V(TNS: img):TNS{
@@ -132,5 +152,6 @@ FUNC SHOW(TNS: img):INT{
     # ShellExecuteW(hwnd, operation, file, params, dir, showcmd)
     # Use NULL hwnd (0), operation "open", empty params and dir, showcmd=1
     win32.WIN_CALL("shell32", "ShellExecuteW", "PSSSSI", "P", 0, "open", img_path, "", "", 1)
+    DEL(img_path)
     RETURN(0)
 }

@@ -58,13 +58,15 @@ Whitespace consists of the space character (`U+0020`), horizontal tab, carriage 
 
 A comment begins with the `#` character and continues to the end of the current line. Comments have no effect on execution.
 
-The program text is divided into several token kinds: binary integer literals (Section 3.1); string literals delimited by double or single quotation marks ("\"", "'", Section 3.2); identifiers for variable names and user-defined function names (Section 2.5); keywords and built-ins (control-flow keywords, built-in operators and functions; see Sections 5 and 13); and delimiters, namely `(`, `)`, `{`, `}`, `[`, `]`, `,`, `:`, and `=`.
+Line separator alias: The semicolon character (`;`) is treated by the lexer as a newline-token alias. Whenever a `;` appears in source code outside of a string literal, the lexer emits a `NEWLINE` token (equivalent to a physical newline), so `;` can be used to separate statements on a single physical line.
+
+The program text is divided into several token kinds: binary integer literals (Section 3.1); string literals delimited by double or single quotation marks (`"`, `'`, Section 3.2); identifiers for variable names and user-defined function names (Section 2.5); keywords and built-ins (control-flow keywords, built-in operators and functions; see Sections 5 and 13); and delimiters, namely `(`, `)`, `{`, `}`, `[`, `]`, `,`, `:`, and `=`.
 
 Keywords: The language's reserved keywords (for example, `IF`, `WHILE`, `FUNC`, etc.) are matched by the lexer exactly as listed in this specification and are case-sensitive. Programs must use the keywords in their canonical uppercase form; otherwise the token will be recognized as an identifier. Built-in operator names such as `INPUT`, `PRINT`, and `IMPORT` follow the same case-sensitive matching rules.
 
 Line continuation: The character `^` serves as a line-continuation marker. When a caret `^` appears in the source and is followed immediately by a newline, both the `^` and the newline are ignored by the lexer (that is, the logical line continues on the next physical line). If a `^` is present in a string, it does not count as a line continuation. If a caret appears and is not immediately followed by a newline (or the platform's single-character newline sequence), the lexer must raise a syntax error.
 
-The character `-` is not an operator token. It is permitted only as the leading sign of a binary integer literal (Section 3.1). If `-` appears anywhere else, the lexer must raise a syntax error. When `-` starts a literal, any spaces, horizontal tabs, or carriage returns between the `-` and the first digit are ignored and the literal is treated as negative.
+The character `-` primarily serves as the leading sign of a numeric literal (Section 3.1). When `-` appears immediately before optional whitespace and then binary digits, it is parsed as part of the numeric literal (that is, a signed literal). In other contexts (for example inside an index expression) a single `-` token is recognized as a dash used for slice notation `lo-hi`. If `-` appears in any other unsupported context the lexer must raise a syntax error.
 
 Identifiers denote variables and user-defined functions. They must be non-empty and case-sensitive. An identifier must not contain non-ASCII characters, nor any of the following characters: `{`, `}`, `[`, `]`, `(`, `)`, `=`, `,`, `#`. The first character of an identifier must not be the digit `0` or `1` (these digits are used to begin binary integer literals). However, the characters `0` and `1` are permitted in subsequent positions within an identifier (for example, `a01` and `X10Y` are valid identifiers, while `0foo` and `1bar` are not). The namespace is flat: variables and functions share a single identifier space, so a given name cannot simultaneously denote both. A user-defined function name must not conflict with the name of any built-in operator or function (see Section 13).
 
@@ -76,7 +78,7 @@ Identifier character set (clarification): The (non-empty) sequence of characters
   - Uppercase letters `A`-`Z`
   - Decimal digits `2`-`9`
   - The punctuation and symbol characters
-    `; / ! @ $ % & ~ _ + | < > ?`
+    `/ ! @ $ % & ~ _ + | < > ?`
 
 - Subsequent characters in an identifier may be any of the following:
 
@@ -84,7 +86,7 @@ Identifier character set (clarification): The (non-empty) sequence of characters
   - Uppercase letters `A`-`Z`
   - Decimal digits `0`-`9`
   - The punctuation and symbol characters
-    `; / ! @ $ % & ~ _ + | < > ?`
+    `/ ! @ $ % & ~ _ + | < > ?`
 
   As noted above, non-ASCII characters remain disallowed, and the delimiter characters `{`, `}`, `(`, `)`, `=`, `,`, and `#` are never permitted inside identifiers.
 
@@ -116,6 +118,10 @@ Tensor literal: a non-empty bracketed collection of expressions. Each pair of ma
 Expressions inside a tensor literal may themselves evaluate to `INT`, `FLT`, `STR`, or `TNS`. If an element expression evaluates to a tensor value, it occupies a single position and does not contribute additional dimensions; only the explicit bracket structure determines the shape. A tensor literal that mixes sub-brackets of differing lengths is invalid (for example, `[[0,0,0],[1,1]]`).
 
 Tensor values carry a fixed shape (dimension count and length per dimension). Each location in a tensor is statically typed by the value it first receives; attempting to write a different type to that location is a runtime error. Tensors are indexed with one-based indices. Negative indices are allowed and count backward from the end of the dimension: index `-k` resolves to position `len - k + 1` (so `-1` is the last element, and `-10`—binary `-2`—is the second-to-last). Index `0` is invalid. Any index whose absolute value exceeds the length of the dimension is out of range, even if negative. Tensors may be re-assigned in two ways: binding a new tensor to the variable name, or writing through an index such as `tensor[dim1,...,dimN] = expr`. The latter mutates the existing tensor value in place at the indexed location and does not construct a new tensor object.
+
+Slice indexing: any index position inside `[...]` may be a range of the form `lo-hi` where `lo` and `hi` are ordinary index expressions. A range selects the contiguous inclusive span of positions from `lo` to `hi` (both endpoints follow the same one-based and negative-index rules described above). Slices may be mixed with hard indices (for example, `tensor[lo-hi, i]`) and reduce the dimensionality of the selected result according to which positions are fixed versus sliced: selecting one or more ranges produces a `TNS` value whose shape equals the lengths of the specified ranges (in the same order). Assigning to a slice is supported: the left-hand side may use ranges in its indices, and the right-hand-side expression must evaluate to a `TNS` whose shape exactly matches the selected slice. Elementwise type compatibility is required: each element being written must match the static element type of the target position, otherwise a runtime error is raised. Example: `tensor[10-11] = [1,11]` writes a two-element tensor into the slice consisting of positions `10` and `11`.
+
+Additionally, the symbol `*` may be used in an index position to denote a full-dimension slice selecting every element along that axis (for example, `tensor[*,1]` selects all elements of the first dimension at index `1` of the second dimension).
 
 All other tensor operations are non-mutating: tensor literals and tensor-valued built-ins produce new tensor values rather than mutating existing ones. Because indexed assignment mutates a tensor object, if the same tensor value is aliased (bound to multiple identifiers, passed as an argument, or stored inside another tensor), all aliases observe the mutation.
 
@@ -501,7 +507,25 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
     document.addEventListener('DOMContentLoaded', function(){
       const md = document.getElementById('md').textContent;
       const rendered = marked.parse(md);
-      document.getElementById('content').innerHTML = rendered;
+      const container = document.getElementById('content');
+      container.innerHTML = rendered;
+
+      // Ensure predictable heading IDs so TOC fragment links work.
+      // Slug function: lowercase, remove punctuation except digits/letters/spaces/-,
+      // collapse spaces to hyphens.
+      function slugify(text) {
+        return text.trim().toLowerCase()
+          .replace(/<[^>]+>/g, '')
+          .replace(/[^a-z0-9\s-]/g, '')
+          .replace(/\s+/g, '-');
+      }
+
+      const headings = container.querySelectorAll('h1,h2,h3,h4,h5,h6');
+      headings.forEach(h => {
+        if (!h.id || h.id.trim() === '') {
+          h.id = slugify(h.textContent || h.innerText || '');
+        }
+      });
     });
   </script>
 </body>

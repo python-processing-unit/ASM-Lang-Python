@@ -216,11 +216,17 @@ FUNC STDLIB_TESTS():INT{
 
     # Pixel / channel access consistency
     TNS: p = image.PIXEL(bmp, 1, 1)
-    ASSERT(EQ(p[1], image.R(bmp, 1, 1)))
-    ASSERT(EQ(p[10], image.G(bmp, 1, 1)))
-    ASSERT(EQ(p[11], image.B(bmp, 1, 1)))
-    ASSERT(EQ(p[100], image.A(bmp, 1, 1)))
+    ASSERT(EQ(p[1], image.PIXEL_R(bmp, 1, 1)))
+    ASSERT(EQ(p[10], image.PIXEL_G(bmp, 1, 1)))
+    ASSERT(EQ(p[11], image.PIXEL_B(bmp, 1, 1)))
+    ASSERT(EQ(p[100], image.PIXEL_A(bmp, 1, 1)))
     DEL(p)
+
+    # Channel extractor helpers (R/G/B/A)
+    ASSERT(EQ(image.R(bmp)[1,1], image.PIXEL_R(bmp, 1, 1)))
+    ASSERT(EQ(image.G(bmp)[1,1], image.PIXEL_G(bmp, 1, 1)))
+    ASSERT(EQ(image.B(bmp)[1,1], image.PIXEL_B(bmp, 1, 1)))
+    ASSERT(EQ(image.A(bmp)[1,1], image.PIXEL_A(bmp, 1, 1)))
 
     # Double-invert returns original
     ASSERT(EQ(image.INVERT(image.INVERT(bmp)), bmp))
@@ -235,8 +241,8 @@ FUNC STDLIB_TESTS():INT{
     DEL(redcol)
     DEL(greencol)
     DEL(filled_rc)
-    ASSERT(EQ(image.R(replaced, 1, 1), 0))
-    ASSERT(EQ(image.G(replaced, 1, 1), 11111111))
+    ASSERT(EQ(image.PIXEL_R(replaced, 1, 1), 0))
+    ASSERT(EQ(image.PIXEL_G(replaced, 1, 1), 11111111))
     DEL(replaced)
 
     # Scale (identity) preserves dimensions
@@ -265,6 +271,13 @@ FUNC STDLIB_TESTS():INT{
     STR: out_png = JOIN(path.interpreter_dir, "/out_test.png")
     DEL(png)
     STR: out_jpeg = JOIN(path.interpreter_dir, "/out_test.jpg")
+
+    # SHOW (only run on Windows to avoid opening viewers on other platforms)
+    IF(EQ(OS(), "win")){
+        INT: show_rc = image.SHOW(bmp)
+        ASSERT(EQ(show_rc, 0))
+        DEL(show_rc)
+    }
 
     # SAVE/LOAD roundtrip (BMP/PNG/JPEG)
     ASSERT(EQ(image.SAVE_BMP(bmp, out_bmp), "OK"))
@@ -301,9 +314,9 @@ FUNC STDLIB_TESTS():INT{
     ASSERT(EQ(image.WIDTH(jpeg_rt2), image.WIDTH(bmp)))
     ASSERT(EQ(image.HEIGHT(jpeg_rt2), image.HEIGHT(bmp)))
     ASSERT(EQ(image.CHANNELS(jpeg_rt2), image.CHANNELS(bmp)))
-    INT: dr = ABS(SUB(image.R(jpeg_rt2, 1, 1), image.R(bmp, 1, 1)))
-    INT: dg = ABS(SUB(image.G(jpeg_rt2, 1, 1), image.G(bmp, 1, 1)))
-    INT: db = ABS(SUB(image.B(jpeg_rt2, 1, 1), image.B(bmp, 1, 1)))
+    INT: dr = ABS(SUB(image.PIXEL_R(jpeg_rt2, 1, 1), image.PIXEL_R(bmp, 1, 1)))
+    INT: dg = ABS(SUB(image.PIXEL_G(jpeg_rt2, 1, 1), image.PIXEL_G(bmp, 1, 1)))
+    INT: db = ABS(SUB(image.PIXEL_B(jpeg_rt2, 1, 1), image.PIXEL_B(bmp, 1, 1)))
     DEL(jpeg_rt2)
     # allow small per-channel differences (<=3)
     ASSERT(LTE(dr, 11))

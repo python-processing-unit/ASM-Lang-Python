@@ -134,6 +134,18 @@ class IndexExpression(Expression):
 
 
 @dataclass
+class Range(Expression):
+    lo: Expression
+    hi: Expression
+
+
+@dataclass
+class Star(Expression):
+    """Represents a full-dimension slice `*` used inside tensor indices."""
+    pass
+
+
+@dataclass
 class TensorSetStatement(Statement):
     target: IndexExpression
     value: "Expression"
@@ -426,7 +438,20 @@ class Parser:
         indices: List[Expression] = []
         if self._peek().type != "RBRACKET":
             while True:
-                indices.append(self._parse_expression())
+                # Support star `*` (full-dimension slice), and slice
+                # syntax lo - hi inside index brackets. The lexer emits a
+                # DASH token for '-' when it's not starting a signed number.
+                if self._peek().type == "STAR":
+                    star_tok = self._consume("STAR")
+                    indices.append(Star(location=self._location_from_token(star_tok)))
+                else:
+                    first = self._parse_expression()
+                    if self._peek().type == "DASH":
+                        self._consume("DASH")
+                        second = self._parse_expression()
+                        indices.append(Range(lo=first, hi=second, location=first.location))
+                    else:
+                        indices.append(first)
                 if not self._match("COMMA"):
                     break
         self._consume("RBRACKET")

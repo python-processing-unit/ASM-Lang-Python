@@ -63,9 +63,15 @@ def _make_tensor_from_pixels(width: int, height: int, pixels: List[int], rule: s
     # micro-optim: cache local refs for faster construction
     _Val = Value
     _TINT = TYPE_INT
+    # Build object array of channel values
     data = np.array([_Val(_TINT, int(ch)) for ch in pixels], dtype=object)
-    shape = [int(height), int(width), 4]  # [row][column][channel]
-    return Value(TYPE_TNS, Tensor(shape=shape, data=data))
+    # Interpreter image tensors use layout [width, height, channel]
+    # The decoder produces pixels in row-major order (y outer, x inner):
+    # reshape to (height, width, 4) then transpose to (width, height, 4).
+    arr = data.reshape((int(height), int(width), 4)).transpose((1, 0, 2)).copy()
+    flat = np.array(arr.flatten(), dtype=object)
+    shape = [int(width), int(height), 4]  # [column][row][channel]
+    return Value(TYPE_TNS, Tensor(shape=shape, data=flat))
 
 
 def _clamp_channel(v: int) -> int:
@@ -90,10 +96,10 @@ def _alpha_blend_pixel(
     # cache locals to avoid repeated attribute lookups
     _expect_int = interpreter._expect_int
     _Val = Value
-    d_r = _expect_int(dest_arr[y, x, 0], rule, location)
-    d_g = _expect_int(dest_arr[y, x, 1], rule, location)
-    d_b = _expect_int(dest_arr[y, x, 2], rule, location)
-    d_a = _expect_int(dest_arr[y, x, 3], rule, location)
+    d_r = _expect_int(dest_arr[x, y, 0], rule, location)
+    d_g = _expect_int(dest_arr[x, y, 1], rule, location)
+    d_b = _expect_int(dest_arr[x, y, 2], rule, location)
+    d_a = _expect_int(dest_arr[x, y, 3], rule, location)
 
     r, g, b, a = color
     sa = _clamp_channel(a)
@@ -104,10 +110,10 @@ def _alpha_blend_pixel(
     out_b = _clamp_channel((sa * b + inv_sa * d_b) // 255)
     out_a = _clamp_channel(sa + (d_a * inv_sa) // 255)
 
-    dest_arr[y, x, 0] = _Val(TYPE_INT, int(out_r))
-    dest_arr[y, x, 1] = _Val(TYPE_INT, int(out_g))
-    dest_arr[y, x, 2] = _Val(TYPE_INT, int(out_b))
-    dest_arr[y, x, 3] = _Val(TYPE_INT, int(out_a))
+    dest_arr[x, y, 0] = _Val(TYPE_INT, int(out_r))
+    dest_arr[x, y, 1] = _Val(TYPE_INT, int(out_g))
+    dest_arr[x, y, 2] = _Val(TYPE_INT, int(out_b))
+    dest_arr[x, y, 3] = _Val(TYPE_INT, int(out_a))
 
 
 # ---- Windows GDI+ fast path ----
@@ -453,12 +459,12 @@ def _op_blit(interpreter, args, _arg_nodes, _env, location):
     if len(args) >= 5:
         mixalpha = interpreter._expect_int(args[4], "BLIT", location)
 
-    # Validate tensor shapes: expect 3D [h][w][4]
+    # Validate tensor shapes: expect 3D [w][h][4]
     if len(src.shape) != 3 or len(dest.shape) != 3 or src.shape[2] != 4 or dest.shape[2] != 4:
         raise ASMRuntimeError("BLIT expects 3D image tensors with 4 channels", location=location, rewrite_rule="BLIT")
 
-    h_src, w_src, _ = src.shape
-    h_dst, w_dst, _ = dest.shape
+    w_src, h_src, _ = src.shape
+    w_dst, h_dst, _ = dest.shape
 
     # Convert to 0-based placement
     x0 = x - 1
@@ -504,15 +510,16 @@ def _op_blit(interpreter, args, _arg_nodes, _env, location):
             src_rx = src_x0 + rx
             dst_rx = dst_x0 + rx
 
-            s_r = _expect_int(src_arr[src_ry, src_rx, 0], "BLIT", location)
-            s_g = _expect_int(src_arr[src_ry, src_rx, 1], "BLIT", location)
-            s_b = _expect_int(src_arr[src_ry, src_rx, 2], "BLIT", location)
-            s_a = _expect_int(src_arr[src_ry, src_rx, 3], "BLIT", location)
+            # source array is indexed as [x, y, c]
+            s_r = _expect_int(src_arr[src_rx, src_ry, 0], "BLIT", location)
+            s_g = _expect_int(src_arr[src_rx, src_ry, 1], "BLIT", location)
+            s_b = _expect_int(src_arr[src_rx, src_ry, 2], "BLIT", location)
+            s_a = _expect_int(src_arr[src_rx, src_ry, 3], "BLIT", location)
 
-            d_r = _expect_int(new_arr[dst_ry, dst_rx, 0], "BLIT", location)
-            d_g = _expect_int(new_arr[dst_ry, dst_rx, 1], "BLIT", location)
-            d_b = _expect_int(new_arr[dst_ry, dst_rx, 2], "BLIT", location)
-            d_a = _expect_int(new_arr[dst_ry, dst_rx, 3], "BLIT", location)
+            d_r = _expect_int(new_arr[dst_rx, dst_ry, 0], "BLIT", location)
+            d_g = _expect_int(new_arr[dst_rx, dst_ry, 1], "BLIT", location)
+            d_b = _expect_int(new_arr[dst_rx, dst_ry, 2], "BLIT", location)
+            d_a = _expect_int(new_arr[dst_rx, dst_ry, 3], "BLIT", location)
 
             if mixalpha:
                 # Simple alpha-over blending where source alpha determines mix
@@ -529,10 +536,10 @@ def _op_blit(interpreter, args, _arg_nodes, _env, location):
                     continue
                 out_r, out_g, out_b, out_a = s_r, s_g, s_b, s_a
 
-            new_arr[dst_ry, dst_rx, 0] = _Val(_TINT, int(out_r))
-            new_arr[dst_ry, dst_rx, 1] = _Val(_TINT, int(out_g))
-            new_arr[dst_ry, dst_rx, 2] = _Val(_TINT, int(out_b))
-            new_arr[dst_ry, dst_rx, 3] = _Val(_TINT, int(out_a))
+            new_arr[dst_rx, dst_ry, 0] = _Val(_TINT, int(out_r))
+            new_arr[dst_rx, dst_ry, 1] = _Val(_TINT, int(out_g))
+            new_arr[dst_rx, dst_ry, 2] = _Val(_TINT, int(out_b))
+            new_arr[dst_rx, dst_ry, 3] = _Val(_TINT, int(out_a))
 
     flat = np.array(new_arr.flatten(), dtype=object)
     return Value(TYPE_TNS, Tensor(shape=list(dest.shape), data=flat))
@@ -558,7 +565,7 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
     # - SCALE(src, scale_x, scale_y) where small integers (e.g. 1,2) act as
     #   multiplicative scale factors. The tests call SCALE(..., 1, 1) expecting
     #   identity behavior, so treat small values as factors.
-    src_h, src_w, _ = src.shape
+    src_w, src_h, _ = src.shape
     # If both provided values are small (<=8), treat them as scale factors.
     use_factors = (abs(target_w) <= 8 and abs(target_h) <= 8)
     if use_factors:
@@ -575,8 +582,8 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
 
     interpreter.builtins._ensure_tensor_ints(src, "SCALE", location)
 
-    src_arr = src.data.reshape((src_h, src_w, 4))
-    out = np.empty((target_h, target_w, 4), dtype=object)
+    src_arr = src.data.reshape((src_w, src_h, 4))
+    out = np.empty((target_w, target_h, 4), dtype=object)
     _expect_int = interpreter._expect_int
     _Val = Value
     _TINT = TYPE_INT
@@ -601,16 +608,16 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
                 wx0 = 1.0 - wx
                 x0_clamped = max(0, min(src_w - 1, x0))
                 x1_clamped = max(0, min(src_w - 1, x1))
-                # sample four neighbors and blend
+                # sample four neighbors and blend — src_arr is [x,y,c]
                 for c in range(4):
-                    v00 = _expect_int(src_arr[y0_clamped, x0_clamped, c], "SCALE", location)
-                    v10 = _expect_int(src_arr[y0_clamped, x1_clamped, c], "SCALE", location)
-                    v01 = _expect_int(src_arr[y1_clamped, x0_clamped, c], "SCALE", location)
-                    v11 = _expect_int(src_arr[y1_clamped, x1_clamped, c], "SCALE", location)
+                    v00 = _expect_int(src_arr[x0_clamped, y0_clamped, c], "SCALE", location)
+                    v10 = _expect_int(src_arr[x1_clamped, y0_clamped, c], "SCALE", location)
+                    v01 = _expect_int(src_arr[x0_clamped, y1_clamped, c], "SCALE", location)
+                    v11 = _expect_int(src_arr[x1_clamped, y1_clamped, c], "SCALE", location)
                     val = (v00 * (wy0 * wx0) + v10 * (wy0 * wx) + v01 * (wy * wx0) + v11 * (wy * wx))
                     iv = int(round(val))
                     iv = 0 if iv < 0 else (255 if iv > 255 else iv)
-                    out[j, i, c] = _Val(_TINT, iv)
+                    out[i, j, c] = _Val(_TINT, iv)
     else:
         # Nearest-neighbor
         for j in range(target_h):
@@ -620,10 +627,10 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
                 src_x = int(round((i + 0.5) * (src_w / float(target_w)) - 0.5))
                 sx = max(0, min(src_w - 1, src_x))
                 for c in range(4):
-                    out[j, i, c] = _Val(_TINT, int(_expect_int(src_arr[sy, sx, c], "SCALE", location)))
+                    out[i, j, c] = _Val(_TINT, int(_expect_int(src_arr[sx, sy, c], "SCALE", location)))
 
     flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[target_h, target_w, 4], data=flat))
+    return Value(TYPE_TNS, Tensor(shape=[target_w, target_h, 4], data=flat))
 
 
 def _op_rotate(interpreter, args, _arg_nodes, _env, location):
@@ -637,9 +644,29 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
     if len(src.shape) != 3 or src.shape[2] != 4:
         raise ASMRuntimeError("ROTATE expects a 3D image tensor with 4 channels", location=location, rewrite_rule="ROTATE")
 
-    h, w, _ = src.shape
+    w, h, _ = src.shape
     interpreter.builtins._ensure_tensor_ints(src, "ROTATE", location)
     arr = src.data.reshape(tuple(src.shape))
+
+    # Fast path: exact 90° or -90° rotations can be implemented with
+    # a simple array transpose/flip (NumPy rot90) which is much faster
+    # than general resampling or converting to Pillow bytes.
+    try:
+        ang = float(degrees)
+    except Exception:
+        ang = degrees
+    # Normalize to [0,360)
+    norm = float(ang) % 360.0
+    import math
+    if math.isclose(norm, 90.0, abs_tol=1e-9) or math.isclose(norm, 270.0, abs_tol=1e-9):
+        # k=1 rotates 90° CCW, k=3 rotates 270° CCW (i.e. -90°)
+        k = 1 if math.isclose(norm, 90.0, abs_tol=1e-9) else 3
+        # arr has shape (w, h, 4) where axes (0,1) are X,Y; rot90 on (0,1)
+        # produces shape (h, w, 4) as required for a 90° rotation.
+        res = np.rot90(arr, k=k, axes=(0, 1)).copy()
+        flat = np.array(res.flatten(), dtype=object)
+        new_w, new_h = int(res.shape[0]), int(res.shape[1])
+        return Value(TYPE_TNS, Tensor(shape=[new_w, new_h, 4], data=flat))
 
     # Try Pillow for robust, fast rotation. Fallback to a numpy implementation.
     try:
@@ -647,12 +674,13 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
 
         flat = bytearray()
         _expect_int = interpreter._expect_int
+        # arr is [x,y,c] — iterate y then x to produce row-major bytes for Pillow
         for y in range(h):
             for x in range(w):
-                r = _expect_int(arr[y, x, 0], "ROTATE", location)
-                g = _expect_int(arr[y, x, 1], "ROTATE", location)
-                b = _expect_int(arr[y, x, 2], "ROTATE", location)
-                a = _expect_int(arr[y, x, 3], "ROTATE", location)
+                r = _expect_int(arr[x, y, 0], "ROTATE", location)
+                g = _expect_int(arr[x, y, 1], "ROTATE", location)
+                b = _expect_int(arr[x, y, 2], "ROTATE", location)
+                a = _expect_int(arr[x, y, 3], "ROTATE", location)
                 flat.extend((r & 0xFF, g & 0xFF, b & 0xFF, a & 0xFF))
 
         im = Image.frombytes('RGBA', (w, h), bytes(flat))
@@ -661,8 +689,9 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
         _Val = Value
         _TINT = TYPE_INT
         out_vals = [_Val(_TINT, int(b)) for b in out_bytes]
-        data = np.array(out_vals, dtype=object)
-        return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=data))
+        data = np.array(out_vals, dtype=object).reshape((h, w, 4)).transpose((1, 0, 2)).copy()
+        flat = np.array(data.flatten(), dtype=object)
+        return Value(TYPE_TNS, Tensor(shape=[w, h, 4], data=flat))
     except Exception:
         # Fall back to numpy bilinear sampling
         import math
@@ -685,7 +714,7 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
             def get(px: int, py: int) -> int:
                 if px < 0 or px >= w or py < 0 or py >= h:
                     return 0
-                return _expect_int(arr[py, px, ch], "ROTATE", location)
+                return _expect_int(arr[px, py, ch], "ROTATE", location)
             v00 = get(x0, y0)
             v10 = get(x0 + 1, y0)
             v01 = get(x0, y0 + 1)
@@ -713,8 +742,9 @@ def _op_rotate(interpreter, args, _arg_nodes, _env, location):
                 out_flat[base+2] = max(0, min(255, b))
                 out_flat[base+3] = max(0, min(255, a))
 
-        data = np.array([Value(TYPE_INT, int(v)) for v in out_flat], dtype=object)
-        return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=data))
+        data = np.array([Value(TYPE_INT, int(v)) for v in out_flat], dtype=object).reshape((h, w, 4)).transpose((1, 0, 2)).copy()
+        flat = np.array(data.flatten(), dtype=object)
+        return Value(TYPE_TNS, Tensor(shape=[w, h, 4], data=flat))
 
 
 def _op_grayscale(interpreter, args, _arg_nodes, _env, location):
@@ -726,32 +756,32 @@ def _op_grayscale(interpreter, args, _arg_nodes, _env, location):
     if len(img.shape) != 3 or img.shape[2] != 4:
         raise ASMRuntimeError("GRAYSCALE expects a 3D image tensor with 4 channels", location=location, rewrite_rule="GRAYSCALE")
 
-    h, w, _ = img.shape
+    w, h, _ = img.shape
     interpreter.builtins._ensure_tensor_ints(img, "GRAYSCALE", location)
-    arr = img.data.reshape((h, w, 4))
-    out = np.empty((h, w, 4), dtype=object)
+    arr = img.data.reshape((w, h, 4))
+    out = np.empty((w, h, 4), dtype=object)
     _expect_int = interpreter._expect_int
     _Val = Value
     _TINT = TYPE_INT
-    for y in range(h):
-        for x in range(w):
-            r = _expect_int(arr[y, x, 0], "GRAYSCALE", location)
-            g = _expect_int(arr[y, x, 1], "GRAYSCALE", location)
-            b = _expect_int(arr[y, x, 2], "GRAYSCALE", location)
-            a = _expect_int(arr[y, x, 3], "GRAYSCALE", location)
+    for x in range(w):
+        for y in range(h):
+            r = _expect_int(arr[x, y, 0], "GRAYSCALE", location)
+            g = _expect_int(arr[x, y, 1], "GRAYSCALE", location)
+            b = _expect_int(arr[x, y, 2], "GRAYSCALE", location)
+            a = _expect_int(arr[x, y, 3], "GRAYSCALE", location)
             # Standard luminance
             lum = int(round(0.299 * r + 0.587 * g + 0.114 * b))
             if lum < 0:
                 lum = 0
             elif lum > 255:
                 lum = 255
-            out[y, x, 0] = _Val(_TINT, lum)
-            out[y, x, 1] = _Val(_TINT, lum)
-            out[y, x, 2] = _Val(_TINT, lum)
-            out[y, x, 3] = _Val(_TINT, a)
+            out[x, y, 0] = _Val(_TINT, lum)
+            out[x, y, 1] = _Val(_TINT, lum)
+            out[x, y, 2] = _Val(_TINT, lum)
+            out[x, y, 3] = _Val(_TINT, a)
 
     flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=flat))
+    return Value(TYPE_TNS, Tensor(shape=[w, h, 4], data=flat))
 
 
 def _op_blur(interpreter, args, _arg_nodes, _env, location):
@@ -767,13 +797,13 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
     if len(img.shape) != 3 or img.shape[2] != 4:
         raise ASMRuntimeError("BLUR expects a 3D image tensor with 4 channels", location=location, rewrite_rule="BLUR")
 
-    h, w, _ = img.shape
+    w, h, _ = img.shape
     if radius == 0 or h == 0 or w == 0:
         flat = np.array(img.data.flat, dtype=object)
         return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
 
     interpreter.builtins._ensure_tensor_ints(img, "BLUR", location)
-    arr = img.data.reshape((h, w, 4)).astype(object)
+    arr = img.data.reshape((w, h, 4)).astype(object)
     _expect_int = interpreter._expect_int
     _Val = Value
     _TINT = TYPE_INT
@@ -791,8 +821,8 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
     kernel = [v / sum_k for v in kernel]
 
     # Horizontal then vertical separable convolution
-    tmp = np.empty((h, w, 4), dtype=float)
-    # horizontal pass
+    tmp = np.empty((w, h, 4), dtype=float)
+    # horizontal pass (along x)
     for y in range(h):
         for x in range(w):
             for c in range(4):
@@ -800,12 +830,12 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
                 for k in range(ksize):
                     sx = x + (k - radius)
                     sx_clamped = max(0, min(w - 1, sx))
-                    val = int(_expect_int(arr[y, sx_clamped, c], "BLUR", location))
+                    val = int(_expect_int(arr[sx_clamped, y, c], "BLUR", location))
                     acc += kernel[k] * val
-                tmp[y, x, c] = acc
+                tmp[x, y, c] = acc
 
-    out = np.empty((h, w, 4), dtype=object)
-    # vertical pass
+    out = np.empty((w, h, 4), dtype=object)
+    # vertical pass (along y)
     for y in range(h):
         for x in range(w):
             for c in range(4):
@@ -813,13 +843,13 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
                 for k in range(ksize):
                     sy = y + (k - radius)
                     sy_clamped = max(0, min(h - 1, sy))
-                    acc += kernel[k] * tmp[sy_clamped, x, c]
+                    acc += kernel[k] * tmp[x, sy_clamped, c]
                 iv = int(round(acc))
                 iv = 0 if iv < 0 else (255 if iv > 255 else iv)
-                out[y, x, c] = _Val(_TINT, iv)
+                out[x, y, c] = _Val(_TINT, iv)
 
     flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[h, w, 4], data=flat))
+    return Value(TYPE_TNS, Tensor(shape=[w, h, 4], data=flat))
 
 
 def _op_polygon(interpreter, args, _arg_nodes, _env, location):
@@ -861,9 +891,9 @@ def _op_polygon(interpreter, args, _arg_nodes, _env, location):
     if pts[0] != pts[-1]:
         raise ASMRuntimeError("POLYGON: first point must equal last point", location=location, rewrite_rule="POLYGON")
 
-    h, w, _ = img.shape
+    w, h, _ = img.shape
     interpreter.builtins._ensure_tensor_ints(img, "POLYGON", location)
-    arr = img.data.reshape((h, w, 4))
+    arr = img.data.reshape((w, h, 4))
     new_arr = arr.copy()
 
     # Extract color
@@ -1029,8 +1059,8 @@ def _op_ellipse(interpreter, args, _arg_nodes, _env, location):
 
     interpreter.builtins._ensure_tensor_ints(img, "ELLIPSE", location)
 
-    h, w, _ = img.shape
-    arr = img.data.reshape((h, w, 4))
+    w, h, _ = img.shape
+    arr = img.data.reshape((w, h, 4))
     new_arr = arr.copy()
 
     if len(color_t.shape) != 1 or color_t.shape[0] != 4:
@@ -1191,16 +1221,16 @@ def _op_save_bmp(interpreter, args, _arg_nodes, _env, location):
     path = _expect_str(args[1], "SAVE_BMP", location)
     if len(t.shape) != 3 or t.shape[2] != 4:
         raise ASMRuntimeError("SAVE_BMP expects a 3D image tensor with 4 channels", location=location, rewrite_rule="SAVE_BMP")
-    h, w, _ = t.shape
+    w, h, _ = t.shape
     interpreter.builtins._ensure_tensor_ints(t, "SAVE_BMP", location)
     flat = []
     arr = t.data.reshape(tuple(t.shape))
     for y in range(h):
         for x in range(w):
-            flat.append(interpreter._expect_int(arr[y, x, 0], "SAVE_BMP", location))
-            flat.append(interpreter._expect_int(arr[y, x, 1], "SAVE_BMP", location))
-            flat.append(interpreter._expect_int(arr[y, x, 2], "SAVE_BMP", location))
-            flat.append(interpreter._expect_int(arr[y, x, 3], "SAVE_BMP", location))
+            flat.append(interpreter._expect_int(arr[x, y, 0], "SAVE_BMP", location))
+            flat.append(interpreter._expect_int(arr[x, y, 1], "SAVE_BMP", location))
+            flat.append(interpreter._expect_int(arr[x, y, 2], "SAVE_BMP", location))
+            flat.append(interpreter._expect_int(arr[x, y, 3], "SAVE_BMP", location))
     try:
         _write_bmp_file(path, w, h, flat)
     except Exception as exc:
@@ -1218,16 +1248,16 @@ def _op_save_png(interpreter, args, _arg_nodes, _env, location):
     level = interpreter._expect_int(args[2], "SAVE_PNG", location)
     if len(t.shape) != 3 or t.shape[2] != 4:
         raise ASMRuntimeError("SAVE_PNG expects a 3D image tensor with 4 channels", location=location, rewrite_rule="SAVE_PNG")
-    h, w, _ = t.shape
+    w, h, _ = t.shape
     interpreter.builtins._ensure_tensor_ints(t, "SAVE_PNG", location)
     arr = t.data.reshape(tuple(t.shape))
     flat = bytearray()
     for y in range(h):
         for x in range(w):
-            r = interpreter._expect_int(arr[y, x, 0], "SAVE_PNG", location)
-            g = interpreter._expect_int(arr[y, x, 1], "SAVE_PNG", location)
-            b = interpreter._expect_int(arr[y, x, 2], "SAVE_PNG", location)
-            a = interpreter._expect_int(arr[y, x, 3], "SAVE_PNG", location)
+            r = interpreter._expect_int(arr[x, y, 0], "SAVE_PNG", location)
+            g = interpreter._expect_int(arr[x, y, 1], "SAVE_PNG", location)
+            b = interpreter._expect_int(arr[x, y, 2], "SAVE_PNG", location)
+            a = interpreter._expect_int(arr[x, y, 3], "SAVE_PNG", location)
             flat.extend((r & 0xFF, g & 0xFF, b & 0xFF, a & 0xFF))
     # Try Pillow first
     try:
@@ -1258,16 +1288,16 @@ def _op_save_jpeg(interpreter, args, _arg_nodes, _env, location):
     quality = interpreter._expect_int(args[2], "SAVE_JPEG", location)
     if len(t.shape) != 3 or t.shape[2] != 4:
         raise ASMRuntimeError("SAVE_JPEG expects a 3D image tensor with 4 channels", location=location, rewrite_rule="SAVE_JPEG")
-    h, w, _ = t.shape
+    w, h, _ = t.shape
     interpreter.builtins._ensure_tensor_ints(t, "SAVE_JPEG", location)
     arr = t.data.reshape(tuple(t.shape))
     flat = bytearray()
     for y in range(h):
         for x in range(w):
-            r = interpreter._expect_int(arr[y, x, 0], "SAVE_JPEG", location)
-            g = interpreter._expect_int(arr[y, x, 1], "SAVE_JPEG", location)
-            b = interpreter._expect_int(arr[y, x, 2], "SAVE_JPEG", location)
-            a = interpreter._expect_int(arr[y, x, 3], "SAVE_JPEG", location)
+            r = interpreter._expect_int(arr[x, y, 0], "SAVE_JPEG", location)
+            g = interpreter._expect_int(arr[x, y, 1], "SAVE_JPEG", location)
+            b = interpreter._expect_int(arr[x, y, 2], "SAVE_JPEG", location)
+            a = interpreter._expect_int(arr[x, y, 3], "SAVE_JPEG", location)
             flat.extend((r & 0xFF, g & 0xFF, b & 0xFF))
     # Try Pillow
     try:
@@ -1287,10 +1317,10 @@ def _op_save_jpeg(interpreter, args, _arg_nodes, _env, location):
             rgba = []
             for y in range(h):
                 for x in range(w):
-                    rgba.append(interpreter._expect_int(arr[y, x, 0], "SAVE_JPEG", location) & 0xFF)
-                    rgba.append(interpreter._expect_int(arr[y, x, 1], "SAVE_JPEG", location) & 0xFF)
-                    rgba.append(interpreter._expect_int(arr[y, x, 2], "SAVE_JPEG", location) & 0xFF)
-                    rgba.append(interpreter._expect_int(arr[y, x, 3], "SAVE_JPEG", location) & 0xFF)
+                    rgba.append(interpreter._expect_int(arr[x, y, 0], "SAVE_JPEG", location) & 0xFF)
+                    rgba.append(interpreter._expect_int(arr[x, y, 1], "SAVE_JPEG", location) & 0xFF)
+                    rgba.append(interpreter._expect_int(arr[x, y, 2], "SAVE_JPEG", location) & 0xFF)
+                    rgba.append(interpreter._expect_int(arr[x, y, 3], "SAVE_JPEG", location) & 0xFF)
             _save_with_gdiplus(path, w, h, rgba, "JPEG", quality=int(quality))
             return Value(TYPE_STR, "OK")
         except Exception as exc:
@@ -1318,9 +1348,9 @@ def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
     if len(img.shape) != 3 or img.shape[2] != 4:
         raise ASMRuntimeError("REPLACE_COLOR expects a 3D image tensor with 4 channels", location=location, rewrite_rule="REPLACE_COLOR")
 
-    h, w, _ = img.shape
+    w, h, _ = img.shape
     interpreter.builtins._ensure_tensor_ints(img, "REPLACE_COLOR", location)
-    src_arr = img.data.reshape((h, w, 4))
+    src_arr = img.data.reshape((w, h, 4))
     new_arr = src_arr.copy()
 
     s_arr = src_col_t.data.reshape(tuple(src_col_t.shape))
@@ -1349,10 +1379,10 @@ def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
 
     for y in range(h):
         for x in range(w):
-            p_r = interpreter._expect_int(new_arr[y, x, 0], "REPLACE_COLOR", location)
-            p_g = interpreter._expect_int(new_arr[y, x, 1], "REPLACE_COLOR", location)
-            p_b = interpreter._expect_int(new_arr[y, x, 2], "REPLACE_COLOR", location)
-            p_a = interpreter._expect_int(new_arr[y, x, 3], "REPLACE_COLOR", location)
+            p_r = interpreter._expect_int(new_arr[x, y, 0], "REPLACE_COLOR", location)
+            p_g = interpreter._expect_int(new_arr[x, y, 1], "REPLACE_COLOR", location)
+            p_b = interpreter._expect_int(new_arr[x, y, 2], "REPLACE_COLOR", location)
+            p_a = interpreter._expect_int(new_arr[x, y, 3], "REPLACE_COLOR", location)
 
             match = False
             if s_has_alpha:
@@ -1368,13 +1398,13 @@ def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
                 continue
 
             # Replace channels. If dst is RGB-only, preserve original alpha.
-            new_arr[y, x, 0] = Value(TYPE_INT, int(d_r))
-            new_arr[y, x, 1] = Value(TYPE_INT, int(d_g))
-            new_arr[y, x, 2] = Value(TYPE_INT, int(d_b))
+            new_arr[x, y, 0] = Value(TYPE_INT, int(d_r))
+            new_arr[x, y, 1] = Value(TYPE_INT, int(d_g))
+            new_arr[x, y, 2] = Value(TYPE_INT, int(d_b))
             if d_has_alpha:
-                new_arr[y, x, 3] = Value(TYPE_INT, int(d_a))
+                new_arr[x, y, 3] = Value(TYPE_INT, int(d_a))
             else:
-                new_arr[y, x, 3] = Value(TYPE_INT, int(p_a))
+                new_arr[x, y, 3] = Value(TYPE_INT, int(p_a))
 
     flat = np.array(new_arr.flatten(), dtype=object)
     return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
@@ -1833,7 +1863,7 @@ def _op_crop(interpreter, args, _arg_nodes, _env, location):
     if len(img.shape) != 3 or img.shape[2] != 4:
         raise ASMRuntimeError("CROP expects a 3D image tensor with 4 channels", location=location, rewrite_rule="CROP")
 
-    h_src, w_src, _ = img.shape
+    w_src, h_src, _ = img.shape
 
     # Convert to 0-based and clamp to image bounds
     left0 = max(0, left - 1)
@@ -1848,11 +1878,11 @@ def _op_crop(interpreter, args, _arg_nodes, _env, location):
     out_h = bottom0 - top0 + 1
 
     interpreter.builtins._ensure_tensor_ints(img, "CROP", location)
-    # Reshape to [h][w][4] view of Value objects
-    img_arr = img.data.reshape((h_src, w_src, 4))
+    # Reshape to [w][h][4] view of Value objects (x, y, c)
+    img_arr = img.data.reshape((w_src, h_src, 4))
 
     # Slice the region once (view of Value objects) and convert to raw ints
-    region = img_arr[top0 : bottom0 + 1, left0 : right0 + 1, :]
+    region = img_arr[left0 : right0 + 1, top0 : bottom0 + 1, :]
     total = out_h * out_w * 4
 
     # Create a fast iterator over the underlying integer values. Using
@@ -1880,17 +1910,17 @@ def _op_invert(interpreter, args, _arg_nodes, _env, location):
     if len(img.shape) != 3 or img.shape[2] != 4:
         raise ASMRuntimeError("INVERT expects a 3D image tensor with 4 channels", location=location, rewrite_rule="INVERT")
 
-    h, w, _ = img.shape
+    w, h, _ = img.shape
     # Ensure underlying values are integers
     interpreter.builtins._ensure_tensor_ints(img, "INVERT", location)
-    src_arr = img.data.reshape((h, w, 4))
+    src_arr = img.data.reshape((w, h, 4))
 
     # Extract integer channel values efficiently using NumPy's fromiter
     # (avoids repeated Python-level per-pixel checks inside nested loops).
-    total = h * w * 4
+    total = w * h * 4
     flat_iter = (int(v.value) for v in src_arr.flatten())
     flat_ints = np.fromiter(flat_iter, dtype=np.int64, count=total)
-    int_arr = flat_ints.reshape((h, w, 4))
+    int_arr = flat_ints.reshape((w, h, 4))
 
     # Invert RGB channels (clamped to 0..255), preserve alpha channel
     rgb = int_arr[:, :, :3] & 0xFF
@@ -1906,9 +1936,9 @@ def _op_invert(interpreter, args, _arg_nodes, _env, location):
 
 def asm_lang_register(ext: ExtensionAPI) -> None:
     ext.metadata(name="image", version="0.1.0")
-    ext.register_operator("LOAD_PNG", 1, 1, _op_load_png, doc="LOAD_PNG(path):TNS[height][width][r,g,b,a]")
-    ext.register_operator("LOAD_JPEG", 1, 1, _op_load_jpeg, doc="LOAD_JPEG(path):TNS[height][width][r,g,b,a]")
-    ext.register_operator("LOAD_BMP", 1, 1, _op_load_bmp, doc="LOAD_BMP(path):TNS[height][width][r,g,b,a]")
+    ext.register_operator("LOAD_PNG", 1, 1, _op_load_png, doc="LOAD_PNG(path):TNS[width][height][r,g,b,a]")
+    ext.register_operator("LOAD_JPEG", 1, 1, _op_load_jpeg, doc="LOAD_JPEG(path):TNS[width][height][r,g,b,a]")
+    ext.register_operator("LOAD_BMP", 1, 1, _op_load_bmp, doc="LOAD_BMP(path):TNS[width][height][r,g,b,a]")
     ext.register_operator("SAVE_BMP", 2, 2, _op_save_bmp, doc="SAVE_BMP(TNS:img, STR:path):STR ; OK")
     ext.register_operator("SAVE_PNG", 3, 3, _op_save_png, doc="SAVE_PNG(TNS:img, STR:path, INT:compression_level):STR ; OK")
     ext.register_operator("SAVE_JPEG", 3, 3, _op_save_jpeg, doc="SAVE_JPEG(TNS:img, STR:path, INT:quality):STR ; OK")

@@ -79,6 +79,11 @@ class Lexer:
                 tokens_append(Token("NEWLINE", "\n", self.line, self.column))
                 _advance()
                 continue
+            # Semicolon acts as a newline-token alias (outside string literals)
+            if ch == ";":
+                tokens_append(Token("NEWLINE", "\n", self.line, self.column))
+                _advance()
+                continue
             if ch == "#":
                 self._consume_comment()
                 continue
@@ -86,11 +91,30 @@ class Lexer:
                 tokens_append(Token(symbols[ch], ch, self.line, self.column))
                 _advance()
                 continue
+            if ch == "*":
+                tokens_append(Token("STAR", "*", self.line, self.column))
+                _advance()
+                continue
             if ch in ('"', "'"):
                 tokens_append(self._consume_string())
                 continue
             if ch == "-":
-                tokens_append(self._consume_signed_number())
+                # '-' can start a signed number (possibly with spaces) or act
+                # as a dash/range token when not followed (after optional
+                # whitespace) by a binary digit.
+                line, col = self.line, self.column
+                # Lookahead to see if '-' introduces a signed number.
+                j = self.index + 1
+                n_text = len(text)
+                # skip spaces/tabs/carriage returns
+                while j < n_text and text[j] in " \t\r":
+                    j += 1
+                if j < n_text and text[j] in "01":
+                    tokens_append(self._consume_signed_number())
+                else:
+                    # Emit a DASH token for use in slice expressions.
+                    tokens_append(Token("DASH", "-", line, col))
+                    self._advance()
                 continue
             if ch in "01":
                 tokens_append(self._consume_unsigned_number())
@@ -215,10 +239,10 @@ class Lexer:
         return Token(token_type, value, line, col)
 
     def _is_identifier_start(self, ch: str) -> bool:
-        return (ch in "abcdefghijklmnopqrstuvwxyz23456789;/ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|<>?")
+        return (ch in "abcdefghijklmnopqrstuvwxyz23456789/ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|<>?")
 
     def _is_identifier_part(self, ch: str) -> bool:
-        return (ch in "abcdefghijklmnopqrstuvwxyz1234567890;./ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|<>?")
+        return (ch in "abcdefghijklmnopqrstuvwxyz1234567890./ABCDEFGHIFJKLMNOPQRSTUVWXYZ!@$%&~_+|<>?")
         # "." is not actually a valid character in namespace symbols, but is allowed since it is used to separate module names from namespace symbols.
 
     def _consume_line_continuation(self) -> None:
