@@ -8,6 +8,7 @@ import platform
 import tempfile
 import codecs
 import numpy as np
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from numpy.typing import NDArray
@@ -24,6 +25,7 @@ from parser import (
     ExpressionStatement,
     ForStatement,
     FuncDef,
+    AsyncStatement,
     GotoStatement,
     GotopointStatement,
     Identifier,
@@ -338,7 +340,6 @@ def _as_bool(value: int) -> int:
 class Builtins:
     def __init__(self) -> None:
         self.table: Dict[str, BuiltinFunction] = {}
-        # Numeric operators that support INT and FLT (no mixing).
         self._register_custom("ADD", 2, 2, self._add)
         self._register_custom("SUB", 2, 2, self._sub)
         self._register_custom("MUL", 2, 2, self._mul)
@@ -412,7 +413,7 @@ class Builtins:
         self._register_custom("TYPE", 1, 1, self._type)
         self._register_custom("ROUND", 1, 3, self._round)
         self._register_custom("READFILE", 1, 2, self._readfile)
-        self._register_custom("BYTES", 1, 1, self._bytes)
+        self._register_custom("BYTES", 1, 2, self._bytes)
         self._register_custom("WRITEFILE", 2, 3, self._writefile)
         self._register_custom("EXISTFILE", 1, 1, self._existfile)
         self._register_custom("CL", 1, 1, self._cl)
@@ -1916,6 +1917,17 @@ class Builtins:
         number = self._expect_int(args[0], "BYTES", location)
         if number < 0:
             raise ASMRuntimeError("BYTES expects a non-negative integer", location=location, rewrite_rule="BYTES")
+        # Optional endian argument: default is big-endian
+        endian = "big"
+        if len(args) >= 2:
+            endian_val = args[1]
+            if endian_val.type != TYPE_STR:
+                raise ASMRuntimeError("BYTES expects string endian argument", location=location, rewrite_rule="BYTES")
+            endian = str(endian_val.value).strip().lower()
+        # Validate endian
+        if endian not in {"big", "little"}:
+            raise ASMRuntimeError("BYTES endian must be 'big' or 'little'", location=location, rewrite_rule="BYTES")
+
         if number == 0:
             data = np.array([Value(TYPE_INT, 0)], dtype=object)
             return Value(TYPE_TNS, Tensor(shape=[1], data=data))
@@ -1925,7 +1937,9 @@ class Builtins:
         while temp > 0:
             octets.append(temp & 0xFF)
             temp >>= 8
-        octets.reverse()
+        # octets currently little-endian (LSB first); reverse for big-endian
+        if endian == "big":
+            octets.reverse()
 
         data = np.array([Value(TYPE_INT, b) for b in octets], dtype=object)
         return Value(TYPE_TNS, Tensor(shape=[len(octets)], data=data))
@@ -3105,6 +3119,38 @@ class Interpreter:
         if isinstance(statement, GotoStatement):
             target = self._evaluate_expression(statement.expression, env)
             raise JumpSignal(target)
+        if isinstance(statement, AsyncStatement):
+            # Execute the block synchronously inside a background thread
+            block = statement.block
+            loc = statement.location
+
+            def _async_worker() -> None:
+                frame = self._new_frame("<async>", env, loc)
+                self.call_stack.append(frame)
+                try:
+                    self._emit_event("async_start", self, frame, env)
+                    try:
+                        self._execute_block(block.statements, env)
+                    except Exception as exc:
+                        # Notify hooks about the error so it can be recorded/handled.
+                        try:
+                            self._emit_event("on_error", self, exc)
+                        except Exception:
+                            pass
+                finally:
+                    # Pop the async frame and emit end event.
+                    try:
+                        self.call_stack.pop()
+                    except Exception:
+                        pass
+                    try:
+                        self._emit_event("async_end", self, frame, env)
+                    except Exception:
+                        pass
+
+            t = threading.Thread(target=_async_worker, daemon=True, name=f"asm_async_{self.frame_counter}")
+            t.start()
+            return
         raise ASMRuntimeError("Unsupported statement", location=statement.location)
 
     def _execute_if(self, statement: IfStatement, env: Environment) -> None:
@@ -3495,17 +3541,26 @@ class Interpreter:
                 )
             try:
                 if keyword_args:
+                    # Allow specific named keywords for certain builtins.
                     if expression.name in {"READFILE", "WRITEFILE"}:
                         allowed = {"coding"}
-                        unexpected = [k for k in keyword_args if k not in allowed]
-                        if unexpected:
-                            raise ASMRuntimeError(
-                                f"Unexpected keyword arguments: {', '.join(sorted(unexpected))}",
-                                location=expression.location,
-                                rewrite_rule=expression.name,
-                            )
-                        if "coding" in keyword_args:
-                            positional_args.append(keyword_args.pop("coding"))
+                        key = "coding"
+                    elif expression.name == "BYTES":
+                        allowed = {"endian"}
+                        key = "endian"
+                    else:
+                        allowed = set()
+                        key = None
+
+                    unexpected = [k for k in keyword_args if k not in allowed]
+                    if unexpected:
+                        raise ASMRuntimeError(
+                            f"Unexpected keyword arguments: {', '.join(sorted(unexpected))}",
+                            location=expression.location,
+                            rewrite_rule=expression.name,
+                        )
+                    if key and key in keyword_args:
+                        positional_args.append(keyword_args.pop(key))
                     if keyword_args:
                         raise ASMRuntimeError(
                             f"{expression.name} does not accept keyword arguments",

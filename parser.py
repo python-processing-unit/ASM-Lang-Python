@@ -118,6 +118,11 @@ class ContinueStatement(Statement):
     pass
 
 
+@dataclass
+class AsyncStatement(Statement):
+    block: Block
+
+
 class Expression(Node):
     pass
 
@@ -231,6 +236,8 @@ class Parser:
             return self._parse_func()
         if token.type == "IF":
             return self._parse_if()
+        if token.type == "ASYNC":
+            return self._parse_async()
         if token.type == "WHILE":
             return self._parse_while()
         if token.type == "FOR":
@@ -363,6 +370,11 @@ class Parser:
         self._consume("LPAREN")
         self._consume("RPAREN")
         return ContinueStatement(location=self._location_from_token(keyword))
+
+    def _parse_async(self) -> AsyncStatement:
+        keyword = self._consume("ASYNC")
+        block: Block = self._parse_block()
+        return AsyncStatement(location=self._location_from_token(keyword), block=block)
 
     def _parse_block(self) -> Block:
         opening = self._peek().type

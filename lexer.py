@@ -26,6 +26,7 @@ KEYWORDS = {
     "WHILE",
     "FOR",
     "FUNC",
+    "ASYNC",
     "RETURN",
     "POP",
     "BREAK",
