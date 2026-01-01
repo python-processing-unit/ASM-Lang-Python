@@ -422,6 +422,12 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `MPROD(TNS: t1, ..., TNS: tN):TNS` — Elementwise product across tensors. Shapes must match; elements must be all `INT` or all `FLT` (no mixing).
 - `TADD/TSSUB/TMUL/TDIV/TPOW(TNS: x, INT|FLT: y):TNS` — Tensor-scalar arithmetic. Tensor elements and scalar must both be `INT` or both be `FLT` (no mixing). Division by zero is an error.
 
+### Concurrency
+
+- `PARALLEL(TNS: functions):INT` — Execute each element of `functions` in parallel. Each element must evaluate to a `FUNC` value; the interpreter invokes each function with no arguments (in separate worker threads) and waits for all workers to complete. Returns `INT` 0 on success. If any element is not a `FUNC` or any worker raises an error, `PARALLEL` raises a runtime error (rewrite: `PARALLEL`) and the failing worker's error is propagated.
+
+- `PARALLEL(FUNC: f1, FUNC: f2, ...):INT` — Variadic form: accept one or more `FUNC` values as direct arguments. Behaviour is equivalent to the tensor form: each supplied function is invoked in parallel with no arguments and the call waits for completion; returns `INT` 0 on success or raises on error.
+
 ### Logarithms
 - `LOG(INT: a):INT` ; floor(log2(a)) for a > 0
 - `LOG(FLT: a):FLT` ; floor(log2(a)) for a > 0
