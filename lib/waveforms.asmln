@@ -35,18 +35,15 @@ FUNC SQUARE(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
     INT: period = CDIV(sr, freq)
     IF(LTE(period, 0)){ RETURN(out) }
     INT: half = DIV(period, 10)
-    INT: idx = 0
-    WHILE(LT(idx, frames)){
-        INT: pos = MOD(idx, period)
+    PARFOR(idx, frames){
+        INT: pos = MOD(SUB(idx, 1), period)
         INT: v = amp
         IF(GTE(pos, half)){ v = NEG(amp) }
-        out[ADD(idx, 1)] = AUDIO_CLAMP(v)
-        idx = ADD(idx, 1)
+        out[idx] = AUDIO_CLAMP(v)
     }
     DEL(frames)
     DEL(period)
     DEL(half)
-    DEL(idx)
     DEL(pos)
     DEL(v)
     RETURN(out)
@@ -62,18 +59,15 @@ FUNC SAWTOOTH(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
     DEL(shape)
     INT: period = CDIV(sr, freq)
     IF(LTE(period, 0)){ RETURN(out) }
-    INT: idx = 0
-    WHILE(LT(idx, frames)){
-        INT: pos = MOD(idx, period)
+    PARFOR(idx, frames){
+        INT: pos = MOD(SUB(idx, 1), period)
         INT: num = MUL(MUL(MUL(pos, 100), amp), 1)
         INT: tmp = DIV(num, period)
         INT: v = SUB(tmp, amp)
-        out[ADD(idx, 1)] = AUDIO_CLAMP(v)
-        idx = ADD(idx, 1)
+        out[idx] = AUDIO_CLAMP(v)
     }
     DEL(frames)
     DEL(period)
-    DEL(idx)
     DEL(pos)
     DEL(num)
     DEL(tmp)
@@ -92,9 +86,8 @@ FUNC TRIANGLE(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
     INT: period = CDIV(sr, freq)
     IF(LTE(period, 0)){ RETURN(out) }
     INT: half = DIV(period, 10)
-    INT: idx = 0
-    WHILE(LT(idx, frames)){
-        INT: pos = MOD(idx, period)
+    PARFOR(idx, frames){
+        INT: pos = MOD(SUB(idx, 1), period)
         INT: v = 0
         IF(LT(pos, half)){
             INT: num = MUL(MUL(MUL(pos, 100), amp), 1)
@@ -106,13 +99,11 @@ FUNC TRIANGLE(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
             INT: tmp = DIV(num, period)
             v = SUB(amp, tmp)
         }
-        out[ADD(idx, 1)] = AUDIO_CLAMP(v)
-        idx = ADD(idx, 1)
+        out[idx] = AUDIO_CLAMP(v)
     }
     DEL(frames)
     DEL(period)
     DEL(half)
-    DEL(idx)
     DEL(pos)
     DEL(v)
     DEL(num)
@@ -130,24 +121,19 @@ FUNC SINE(INT: freq, INT: ms, INT: amp, INT: sr):TNS{
     TNS: base = SAWTOOTH(freq, ms, amp, sr)
     TNS: out = TNS(shape, 0)
     DEL(shape)
-    INT: idx = 0
-    WHILE(LT(idx, frames)){
-        INT: i1 = ADD(idx, 1)
-        INT: previ = i1
-        IF(GT(i1, 1)){ previ = SUB(i1, 1) }
-        INT: nexti = i1
-        IF(LT(i1, frames)){ nexti = ADD(i1, 1) }
+    PARFOR(idx, frames){
+        INT: previ = idx
+        IF(GT(idx, 1)){ previ = SUB(idx, 1) }
+        INT: nexti = idx
+        IF(LT(idx, frames)){ nexti = ADD(idx, 1) }
         INT: a = base[previ]
-        INT: b = base[i1]
+        INT: b = base[idx]
         INT: c = base[nexti]
         INT: sum = ADD(ADD(a, b), c)
         INT: v = DIV(sum, 11)
-        out[i1] = AUDIO_CLAMP(v)
-        idx = ADD(idx, 1)
+        out[idx] = AUDIO_CLAMP(v)
     }
     DEL(frames)
-    DEL(idx)
-    DEL(i1)
     DEL(previ)
     DEL(nexti)
     DEL(a)
@@ -170,18 +156,15 @@ FUNC PULSE(INT: freq, INT: ms, INT: amp, INT: sr, INT: duty):TNS{
     INT: period = CDIV(sr, freq)
     IF(LTE(period, 0)){ RETURN(out) }
     INT: thresh = DIV(MUL(period, duty), 1100100)
-    INT: idx = 0
-    WHILE(LT(idx, frames)){
-        INT: pos = MOD(idx, period)
+    PARFOR(idx, frames){
+        INT: pos = MOD(SUB(idx, 1), period)
         INT: v = amp
         IF(GTE(pos, thresh)){ v = NEG(amp) }
-        out[ADD(idx, 1)] = AUDIO_CLAMP(v)
-        idx = ADD(idx, 1)
+        out[idx] = AUDIO_CLAMP(v)
     }
     DEL(frames)
     DEL(period)
     DEL(thresh)
-    DEL(idx)
     DEL(pos)
     DEL(v)
     RETURN(out)
@@ -209,7 +192,6 @@ FUNC ENVELOPE_ADSR( ^
         frames = shape[10]
     } # shape[10] -> ^shape[2] (binary '10')
     TNS: out = TNS(shape, 0)
-    INT: idx = 0
     # clamp segment lengths so they don't exceed frames
     INT: a = attack
     IF(GT(a, frames)){ a = frames }
@@ -218,17 +200,17 @@ FUNC ENVELOPE_ADSR( ^
     INT: r = release
     IF(GT(ADD(ADD(a,d), r), frames)){ r = SUB(frames, ADD(a,d)) }
     INT: s_len = SUB(frames, ADD(ADD(a,d), r))
-    WHILE(LT(idx, frames)){
-        INT: i1 = ADD(idx, 1)
+    PARFOR(idx, frames){
+        INT: z = SUB(idx, 1)
         INT: v = 0
-        IF(LT(idx, a)){
+        IF(LT(z, a)){
             # attack: ramp 0 -> 100
             IF(EQ(a, 0)){ v = 100 }ELSE{
-                INT: num = MUL(i1, 100)
+                INT: num = MUL(idx, 100)
                 v = DIV(num, a)
             }
         } ELSE {
-            INT: pos = SUB(idx, a)
+            INT: pos = SUB(z, a)
             IF(LT(pos, d)){
                 # decay: ramp 100 -> sustain
                 IF(EQ(d, 0)){ v = sustain }ELSE{
@@ -252,12 +234,10 @@ FUNC ENVELOPE_ADSR( ^
                 }
             }
         }
-        out[i1] = AUDIO_CLAMP(v)
-        idx = ADD(idx, 1)
+        out[idx] = AUDIO_CLAMP(v)
     }
     DEL(slen)
     DEL(frames)
-    DEL(idx)
     DEL(a)
     DEL(d)
     DEL(r)
@@ -275,27 +255,25 @@ FUNC LOWPASS(TNS: inp, INT: cutoff, INT: sr):TNS{
     TNS: out = TNS(shape, 0)
     INT: period = CDIV(sr, cutoff)
     IF(LTE(period, 0)){ RETURN(out) }
-    INT: idx = 0
-    WHILE(LT(idx, frames)){
+    PARFOR(idx, frames){
+        INT: z = SUB(idx, 1)
         # compute window start
-        INT: start = SUB(idx, SUB(period, 1))
+        INT: start = SUB(z, SUB(period, 1))
         IF(LT(start, 0)){ start = 0 }
         INT: j = start
         INT: sum = 0
-        WHILE(LTE(j, idx)){
+        WHILE(LTE(j, z)){
             INT: sample = inp[ADD(j, 1)]
             sum = ADD(sum, sample)
             j = ADD(j, 1)
         }
-        INT: count = SUB( ADD(idx, 1), start )
+        INT: count = SUB( ADD(z, 1), start )
         INT: avg = 0
         IF(GTE(count, 1)){ avg = DIV(sum, count) }
-        out[ADD(idx, 1)] = AUDIO_CLAMP(avg)
-        idx = ADD(idx, 1)
+        out[idx] = AUDIO_CLAMP(avg)
     }
     DEL(slen)
     DEL(frames)
-    DEL(idx)
     DEL(period)
     DEL(start)
     DEL(j)
@@ -313,17 +291,14 @@ FUNC HIGHPASS(TNS: inp, INT: cutoff, INT: sr):TNS{
     INT: slen = TLEN(shape, 1)
     INT: frames = 0
     IF(EQ(slen, 1)){frames = shape[1]} ELSE {frames = shape[10]}
-    INT: idx = 0
-    WHILE(LT(idx, frames)){
-        INT: i1 = ADD(idx, 1)
+    PARFOR(idx, frames){
+        INT: i1 = idx
         INT: a = inp[i1]
         INT: b = low[i1]
         out[i1] = AUDIO_CLAMP(SUB(a, b))
-        idx = ADD(idx, 1)
     }
     DEL(slen)
     DEL(frames)
-    DEL(idx)
     DEL(low)
     RETURN(out)
 }

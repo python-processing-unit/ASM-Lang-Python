@@ -74,6 +74,13 @@ class ForStatement(Statement):
 
 
 @dataclass
+class ParForStatement(Statement):
+    counter: str
+    target_expr: "Expression"
+    block: Block
+
+
+@dataclass
 class FuncDef(Statement):
     name: str
     params: List["Param"]
@@ -240,6 +247,8 @@ class Parser:
             return self._parse_async()
         if token.type == "WHILE":
             return self._parse_while()
+        if token.type == "PARFOR":
+            return self._parse_parfor()
         if token.type == "FOR":
             return self._parse_for()
         if token.type == "RETURN":
@@ -338,6 +347,16 @@ class Parser:
         self._consume("RPAREN")
         block: Block = self._parse_block()
         return ForStatement(location=self._location_from_token(keyword), counter=counter.value, target_expr=target, block=block)
+
+    def _parse_parfor(self) -> ParForStatement:
+        keyword = self._consume("PARFOR")
+        self._consume("LPAREN")
+        counter = self._consume("IDENT")
+        self._consume("COMMA")
+        target: Expression = self._parse_expression()
+        self._consume("RPAREN")
+        block: Block = self._parse_block()
+        return ParForStatement(location=self._location_from_token(keyword), counter=counter.value, target_expr=target, block=block)
 
     def _parse_return(self) -> ReturnStatement:
         keyword = self._consume("RETURN")

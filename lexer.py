@@ -25,6 +25,7 @@ KEYWORDS = {
     "ELSE",
     "WHILE",
     "FOR",
+    "PARFOR",
     "FUNC",
     "ASYNC",
     "RETURN",

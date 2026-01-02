@@ -123,7 +123,7 @@ def run_repl(*, verbose: bool, services) -> int:
         is_block_start = False
         if not buffer:
             uc = stripped.upper()
-            if uc.startswith("FUNC") or uc.startswith("IF") or uc.startswith("WHILE") or uc.startswith("FOR"):
+            if uc.startswith("FUNC") or uc.startswith("IF") or uc.startswith("WHILE") or uc.startswith("FOR") or uc.startswith("PARFOR"):
                 is_block_start = True
             if stripped.endswith("{"):
                 is_block_start = True

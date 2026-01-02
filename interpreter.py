@@ -24,6 +24,7 @@ from parser import (
     Expression,
     ExpressionStatement,
     ForStatement,
+    ParForStatement,
     FuncDef,
     AsyncStatement,
     GotoStatement,
@@ -58,7 +59,7 @@ TYPE_FUNC = "FUNC"
 # On Windows, command lines over a certain length cause CreateProcess errors
 WINDOWS_COMMAND_LENGTH_LIMIT = 8000
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Tensor:
     shape: List[int]
     data: NDArray[Any]
@@ -76,7 +77,7 @@ class Tensor:
         object.__setattr__(self, "strides", tuple(out))
 
 
-@dataclass
+@dataclass(slots=True)
 class Value:
     type: str
     value: Any
@@ -128,7 +129,7 @@ class JumpSignal(Exception):
         self.target = target
 
 
-@dataclass
+@dataclass(slots=True)
 class Environment:
     parent: Optional["Environment"] = None
     values: Dict[str, Value] = field(default_factory=dict)
@@ -138,16 +139,29 @@ class Environment:
     def _find_env(self, name: str) -> Optional["Environment"]:
         env: Optional[Environment] = self
         while env is not None:
-            if name in env.values:
+            if env.values.get(name) is not None:
                 return env
             env = env.parent
         return None
 
     def set(self, name: str, value: Value, declared_type: Optional[str] = None) -> None:
-        env = self._find_env(name)
-        if env is not None:
-            existing = env.values[name]
-            if name in env.frozen or name in env.permafrozen:
+        # Hot-path: inline _find_env to avoid an extra Python call on every assignment.
+        env: Optional[Environment] = self
+        found_env: Optional[Environment] = None
+        found_existing: Optional[Value] = None
+        while env is not None:
+            values = env.values
+            existing = values.get(name)
+            if existing is not None:
+                found_env = env
+                found_existing = existing
+                break
+            env = env.parent
+
+        if found_env is not None:
+            assert found_existing is not None
+            existing = found_existing
+            if name in found_env.frozen or name in found_env.permafrozen:
                 raise ASMRuntimeError(
                     f"Identifier '{name}' is frozen and cannot be reassigned",
                     rewrite_rule="ASSIGN",
@@ -162,7 +176,7 @@ class Environment:
                     f"Type mismatch for '{name}': expected {existing.type} but got {value.type}",
                     rewrite_rule="ASSIGN",
                 )
-            env.values[name] = value
+            found_env.values[name] = value
             return
 
         if declared_type is None:
@@ -178,28 +192,50 @@ class Environment:
         self.values[name] = value
 
     def get(self, name: str) -> Value:
-        env = self._find_env(name)
-        if env is not None:
-            return env.values[name]
+        # Hot-path: inline _find_env to avoid an extra Python call on every read.
+        env: Optional[Environment] = self
+        while env is not None:
+            values = env.values
+            found = values.get(name)
+            if found is not None:
+                return found
+            env = env.parent
         raise ASMRuntimeError(f"Undefined identifier '{name}'", rewrite_rule="IDENT")
 
     def get_optional(self, name: str) -> Optional[Value]:
-        env = self._find_env(name)
-        if env is not None:
-            return env.values[name]
+        # Hot-path: inline _find_env; heavily used by identifier evaluation.
+        env: Optional[Environment] = self
+        while env is not None:
+            values = env.values
+            found = values.get(name)
+            if found is not None:
+                return found
+            env = env.parent
         return None
 
     def delete(self, name: str) -> None:
-        env = self._find_env(name)
-        if env is not None:
-            if name in env.frozen or name in env.permafrozen:
+        env: Optional[Environment] = self
+        found_env: Optional[Environment] = None
+        while env is not None:
+            if env.values.get(name) is not None:
+                found_env = env
+                break
+            env = env.parent
+
+        if found_env is not None:
+            if name in found_env.frozen or name in found_env.permafrozen:
                 raise ASMRuntimeError(f"Identifier '{name}' is frozen and cannot be deleted", rewrite_rule="DEL")
-            del env.values[name]
+            del found_env.values[name]
             return
         raise ASMRuntimeError(f"Cannot delete undefined identifier '{name}'", rewrite_rule="DEL")
 
     def has(self, name: str) -> bool:
-        return self._find_env(name) is not None
+        env: Optional[Environment] = self
+        while env is not None:
+            if env.values.get(name) is not None:
+                return True
+            env = env.parent
+        return False
 
     def snapshot(self) -> Dict[str, str]:
         def _render(val: Value) -> str:
@@ -245,7 +281,7 @@ class Environment:
         env.permafrozen.add(name)
 
 
-@dataclass
+@dataclass(slots=True)
 class Function:
     name: str
     params: List[Param]
@@ -254,7 +290,7 @@ class Function:
     closure: Environment
 
 
-@dataclass
+@dataclass(slots=True)
 class Frame:
     name: str
     env: Environment
@@ -263,7 +299,7 @@ class Frame:
     gotopoints: Dict[Any, int] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class StateEntry:
     step_index: int
     state_id: str
@@ -323,7 +359,7 @@ class StateLogger:
 BuiltinImpl = Callable[["Interpreter", List[Value], List[Expression], Environment, SourceLocation], Value]
 
 
-@dataclass
+@dataclass(slots=True)
 class BuiltinFunction:
     name: str
     min_args: int
@@ -447,6 +483,22 @@ class Builtins:
         self._register_custom("PARALLEL", 1, None, self._parallel)
 
     def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
+        if arity == 1:
+            def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+                a = self._expect_int(args[0], name, location)
+                return Value(TYPE_INT, func(a))
+
+            self.table[name] = BuiltinFunction(name=name, min_args=1, max_args=1, impl=impl)
+            return
+        if arity == 2:
+            def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+                a = self._expect_int(args[0], name, location)
+                b = self._expect_int(args[1], name, location)
+                return Value(TYPE_INT, func(a, b))
+
+            self.table[name] = BuiltinFunction(name=name, min_args=2, max_args=2, impl=impl)
+            return
+
         def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
             ints = [self._expect_int(arg, name, location) for arg in args]
             return Value(TYPE_INT, func(*ints))
@@ -3127,27 +3179,29 @@ class Interpreter:
             if new_value.type != TYPE_TNS:
                 raise ASMRuntimeError("Slice assignment requires tensor value", location=statement.location, rewrite_rule="ASSIGN")
             assert isinstance(new_value.value, Tensor)
-            sel_shape = list(np.array(sel, dtype=object).shape)
+            sel_shape = list(sel.shape) if isinstance(sel, np.ndarray) else list(np.array(sel, dtype=object).shape)
             if sel_shape != new_value.value.shape:
                 raise ASMRuntimeError("Slice assignment shape mismatch", location=statement.location, rewrite_rule="ASSIGN")
 
             # Elementwise type check then mutate in place
-            sel_view = np.array(sel, dtype=object)
+            sel_view = sel if isinstance(sel, np.ndarray) else np.array(sel, dtype=object)
+            sel_flat = sel_view.ravel()
             new_flat = new_value.value.data.ravel()
-            if sel_view.size != new_flat.size:
+            if sel_flat.size != new_flat.size:
                 raise ASMRuntimeError("Slice assignment size mismatch", location=statement.location, rewrite_rule="ASSIGN")
             # Verify element type compatibility
-            for i in range(sel_view.size):
-                cur = sel_view.ravel()[i]
+            for i in range(sel_flat.size):
+                cur = sel_flat[i]
                 newv = new_flat[i]
                 if cur.type != newv.type:
                     raise ASMRuntimeError("Tensor element type mismatch", location=statement.location, rewrite_rule="ASSIGN")
             # Perform mutation on the original array view
             # Use flat indexing into the original view to preserve object identity
             target_view = arr[tuple(indexers)]
+            target_flat = target_view.ravel()
             # Assign element-wise
             for i in range(new_flat.size):
-                target_view.flat[i] = new_flat[i]
+                target_flat[i] = new_flat[i]
             return
         if isinstance(statement, ExpressionStatement):
             self._evaluate_expression(statement.expression, env)
@@ -3160,6 +3214,9 @@ class Interpreter:
             return
         if isinstance(statement, ForStatement):
             self._execute_for(statement, env)
+            return
+        if isinstance(statement, ParForStatement):
+            self._execute_parfor(statement, env)
             return
         if isinstance(statement, FuncDef):
             if statement.name in self.builtins.table:
@@ -3325,6 +3382,12 @@ class Interpreter:
         # FOR loops use 1-indexed counters (language-level). Initialize
         # counter to 1 and iterate while counter <= target so library code
         # that indexes tensors with the loop variable works correctly.
+        # Preserve any pre-existing binding for the counter so it can be
+        # restored after the loop. The loop counter itself is loop-local
+        # (not retained in the enclosing environment) but symbols created
+        # inside the loop body are placed in the enclosing environment.
+        prior = env.get_optional(statement.counter)
+        had_prior = prior is not None
         env.set(statement.counter, Value(TYPE_INT, 1), declared_type=TYPE_INT)
         while self._expect_int(env.get(statement.counter), "FOR", statement.location) <= target:
             try:
@@ -3343,6 +3406,133 @@ class Interpreter:
                 # no further iterations -> behave like BREAK(1)
                 return
             env.set(statement.counter, Value(TYPE_INT, self._expect_int(env.get(statement.counter), "FOR", statement.location) + 1))
+        # Restore or remove the loop counter binding so the counter does
+        # not leak into the enclosing scope.
+        try:
+            if had_prior:
+                assert prior is not None
+                env.set(statement.counter, prior)
+            else:
+                # If the counter was newly created, delete it from the
+                # nearest enclosing environment.
+                try:
+                    env.delete(statement.counter)
+                except ASMRuntimeError:
+                    # If deletion fails for any reason (e.g. frozen), leave
+                    # the current binding in place; propagate nothing here.
+                    pass
+        except ASMRuntimeError:
+            # If restoring the prior value or deleting failed, annotate
+            # with loop location and re-raise.
+            raise
+
+    def _execute_parfor(self, statement: ParForStatement, env: Environment) -> None:
+        eval_expr = self._evaluate_expression
+        target_val = eval_expr(statement.target_expr, env)
+        target = self._expect_int(target_val, "PARFOR", statement.location)
+
+        threads: List[threading.Thread] = []
+        errors: List[Exception] = []
+        break_holder: List[BreakSignal] = []
+        break_event = threading.Event()
+        # Track child environments produced by each iteration so their
+        # declared symbols (other than the counter) can be merged back
+        # into the enclosing environment after iterations complete.
+        child_envs: List[Environment] = []
+        child_envs_lock = threading.Lock()
+
+        # Capture the current (enclosing) frame name so workers can resolve
+        # unqualified function names relative to the module that started the
+        # PARFOR. We capture it here to avoid reading `self.call_stack` from
+        # worker threads where the stack may differ.
+        parent_frame_name = self.call_stack[-1].name if self.call_stack else "<top-level>"
+
+        def _worker(iter_idx: int) -> None:
+            # Create an isolated environment for this iteration by shallow-copying
+            # the current environment's values so writes do not race with other
+            # iterations. This keeps reads consistent but isolates mutation.
+            child_env = Environment(parent=None, values=dict(env.values), frozen=set(env.frozen), permafrozen=set(env.permafrozen))
+            # Set the loop counter (1-indexed)
+            child_env.values[statement.counter] = Value(TYPE_INT, iter_idx)
+            # Record this child environment for later merge.
+            try:
+                with child_envs_lock:
+                    child_envs.append(child_env)
+            except Exception:
+                # Best-effort: if we cannot record the env, proceed anyway.
+                pass
+            # Use a frame name that preserves the enclosing frame's module
+            # prefix so resolution of unqualified function calls (e.g.
+            # `AUDIO_CLAMP`) inside the iteration will find module-local
+            # functions such as `waveforms.AUDIO_CLAMP`.
+            frame_name = f"{parent_frame_name}.<parfor>"
+            frame = self._new_frame(frame_name, child_env, statement.location)
+            self.call_stack.append(frame)
+            try:
+                try:
+                    # If a BREAK already occurred in another iteration, skip work.
+                    if break_event.is_set():
+                        return
+                    self._execute_block(statement.block.statements, child_env)
+                except BreakSignal as bs:
+                    # Signal termination of the whole PARFOR.
+                    break_holder.append(bs)
+                    break_event.set()
+                    return
+                except ContinueSignal:
+                    # CONTINUE ends this iteration only.
+                    return
+                except Exception as exc:
+                    # record exception for propagation after join
+                    errors.append(exc)
+            finally:
+                try:
+                    self.call_stack.pop()
+                except Exception:
+                    pass
+
+        for i in range(1, target + 1):
+            # If a BREAK has been signaled, stop starting further iterations.
+            if break_event.is_set():
+                break
+            t = threading.Thread(target=lambda idx=i: _worker(idx), name=f"asm_parfor_{self.frame_counter}_{i}")
+            threads.append(t)
+            t.start()
+
+        # Wait for all iterations to complete
+        for t in threads:
+            t.join()
+        # Merge declared/modified symbols from child envs back into the
+        # enclosing environment. Skip the loop counter which is iteration-
+        # local. If multiple iterations wrote the same name, later writes
+        # win (last-writer-wins). Merging happens before propagating any
+        # BREAK or iteration errors so user-visible state is consistent.
+        orig_keys = set(env.values.keys())
+        for child in child_envs:
+            for name, val in child.values.items():
+                if name == statement.counter:
+                    continue
+                try:
+                    if name in orig_keys:
+                        env.set(name, val)
+                    else:
+                        env.set(name, val, declared_type=val.type)
+                except ASMRuntimeError as err:
+                    err.location = statement.location
+                    raise
+
+        # If a BREAK was raised in any iteration, propagate it to the caller
+        if break_holder:
+            # Re-raise the first BreakSignal so outer loops may handle it.
+            raise break_holder[0]
+
+        if errors:
+            # Raise the first recorded exception as a runtime error
+            exc = errors[0]
+            loc = statement.location
+            if isinstance(exc, ASMRuntimeError):
+                raise exc
+            raise ASMRuntimeError(f"Error in PARFOR iteration: {exc}", location=loc, rewrite_rule="PARFOR")
 
     def _condition_int(self, value: Value, location: Optional[SourceLocation]) -> int:
         # Fast-path the built-in scalar types; this avoids repeated registry
@@ -3571,7 +3761,7 @@ class Interpreter:
                     indexers.append(idx_res - 1)
 
             sel = arr[tuple(indexers)]
-            sel_arr = np.array(sel, dtype=object)
+            sel_arr = sel if isinstance(sel, np.ndarray) else np.array(sel, dtype=object)
             # Ensure sel_arr is at least 1-D (slices guarantee at least one dim)
             if sel_arr.ndim == 0:
                 # Single element selected despite slice usage; wrap as 1-element tensor
@@ -3887,8 +4077,13 @@ class Interpreter:
         return Frame(name=name, env=env, frame_id=frame_id, call_location=call_location)
 
     def _emit_event(self, event: str, *args: Any, **kwargs: Any) -> None:
+        # Hot-path: avoid a function call + loop when no handlers exist.
+        handlers = self.hook_registry._events.get(event)
+        if not handlers:
+            return
         try:
-            self.hook_registry.emit(event, *args, **kwargs)
+            for _priority, handler, _ext in handlers:
+                handler(*args, **kwargs)
         except ASMRuntimeError:
             raise
         except Exception as exc:
@@ -3923,6 +4118,9 @@ class Interpreter:
         )
 
         # Run extension step rules (every N steps) after recording.
+        # Hot-path: skip context allocation + dispatch if none are registered.
+        if not self.hook_registry._step_rules:
+            return
         try:
             self.hook_registry.after_step(
                 self,

@@ -14,17 +14,8 @@ INT: CH_CONST1 = 00110011001000000110010001101110
 INT: CH_CONST2 = 01111001011000100010110100110010
 INT: CH_CONST3 = 01101011001000000110010101110100
 
-INT: ch_key0 = 0
-INT: ch_key1 = 0
-INT: ch_key2 = 0
-INT: ch_key3 = 0
-INT: ch_key4 = 0
-INT: ch_key5 = 0
-INT: ch_key6 = 0
-INT: ch_key7 = 0
-INT: ch_nonce0 = 0
-INT: ch_nonce1 = 0
-INT: ch_nonce2 = 0
+TNS: ch_key = [0,0,0,0,0,0,0,0]
+TNS: ch_nonce = [0,0,0]
 INT: ch_counter = 0
 TNS: ch_buf = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
 INT: ch_buf_pos = 10000  # 16 -> force refill
@@ -54,18 +45,18 @@ FUNC CHACHA_BLOCK():TNS{
     INT: x1 = CH_CONST1
     INT: x2 = CH_CONST2
     INT: x3 = CH_CONST3
-    INT: x4 = ch_key0
-    INT: x5 = ch_key1
-    INT: x6 = ch_key2
-    INT: x7 = ch_key3
-    INT: x8 = ch_key4
-    INT: x9 = ch_key5
-    INT: x10 = ch_key6
-    INT: x11 = ch_key7
+    INT: x4 = ch_key[1]
+    INT: x5 = ch_key[10]
+    INT: x6 = ch_key[11]
+    INT: x7 = ch_key[100]
+    INT: x8 = ch_key[101]
+    INT: x9 = ch_key[110]
+    INT: x10 = ch_key[111]
+    INT: x11 = ch_key[1000]
     INT: x12 = ch_counter
-    INT: x13 = ch_nonce0
-    INT: x14 = ch_nonce1
-    INT: x15 = ch_nonce2
+    INT: x13 = ch_nonce[1]
+    INT: x14 = ch_nonce[10]
+    INT: x15 = ch_nonce[11]
     INT: i = 0
     WHILE( LT(i, 1010) ){  # 10 double-rounds
         TNS: qr = QR(x0, x4, x8,  x12)
@@ -117,18 +108,18 @@ FUNC CHACHA_BLOCK():TNS{
     x1 = BAND( ADD(x1, CH_CONST1), MASK32 )
     x2 = BAND( ADD(x2, CH_CONST2), MASK32 )
     x3 = BAND( ADD(x3, CH_CONST3), MASK32 )
-    x4 = BAND( ADD(x4, ch_key0), MASK32 )
-    x5 = BAND( ADD(x5, ch_key1), MASK32 )
-    x6 = BAND( ADD(x6, ch_key2), MASK32 )
-    x7 = BAND( ADD(x7, ch_key3), MASK32 )
-    x8 = BAND( ADD(x8, ch_key4), MASK32 )
-    x9 = BAND( ADD(x9, ch_key5), MASK32 )
-    x10 = BAND( ADD(x10, ch_key6), MASK32 )
-    x11 = BAND( ADD(x11, ch_key7), MASK32 )
+    x4 = BAND( ADD(x4, ch_key[1]), MASK32 )
+    x5 = BAND( ADD(x5, ch_key[10]), MASK32 )
+    x6 = BAND( ADD(x6, ch_key[11]), MASK32 )
+    x7 = BAND( ADD(x7, ch_key[100]), MASK32 )
+    x8 = BAND( ADD(x8, ch_key[101]), MASK32 )
+    x9 = BAND( ADD(x9, ch_key[110]), MASK32 )
+    x10 = BAND( ADD(x10, ch_key[111]), MASK32 )
+    x11 = BAND( ADD(x11, ch_key[1000]), MASK32 )
     x12 = BAND( ADD(x12, ch_counter), MASK32 )
-    x13 = BAND( ADD(x13, ch_nonce0), MASK32 )
-    x14 = BAND( ADD(x14, ch_nonce1), MASK32 )
-    x15 = BAND( ADD(x15, ch_nonce2), MASK32 )
+    x13 = BAND( ADD(x13, ch_nonce[1]), MASK32 )
+    x14 = BAND( ADD(x14, ch_nonce[10]), MASK32 )
+    x15 = BAND( ADD(x15, ch_nonce[11]), MASK32 )
 
     TNS: out = [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15]
     RETURN(out)
@@ -144,32 +135,23 @@ FUNC REFILL_BUF():INT{
 FUNC DERIVE_KEY_AND_NONCE(INT:seed):INT{
     INT: s = BAND(seed, MASK32)
     INT: i = 0
-    WHILE( LT(i, 1000) ){  # 8 key words
+    WHILE( LT(i, 1000) ){  # 8 key words (1000 == 8)
         s = BAND( ADD( MUL(s, ^
             01000001110001100100111001101101), ^
             00000000000000000011000000111001 ), ^
             MASK32 ^
         )
-        IF(EQ(i,0)){ ch_key0 = s }
-        IF(EQ(i,1)){ ch_key1 = s }
-        IF(EQ(i,10)){ ch_key2 = s }
-        IF(EQ(i,11)){ ch_key3 = s }
-        IF(EQ(i,100)){ ch_key4 = s }
-        IF(EQ(i,101)){ ch_key5 = s }
-        IF(EQ(i,110)){ ch_key6 = s }
-        IF(EQ(i,111)){ ch_key7 = s }
+        ch_key[ ADD(i, 1) ] = s
         i = ADD(i, 1)
     }
     INT: j = 0
-    WHILE( LT(j, 11) ){  # 3 nonce words
+    WHILE( LT(j, 11) ){  # 3 nonce words (11 == 3)
         s = BAND( ADD( MUL(s, ^
             01000001110001100100111001101101), ^
             00000000000000000011000000111001 ), ^
             MASK32 ^
         )
-        IF(EQ(j,0)){ ch_nonce0 = s }
-        IF(EQ(j,1)){ ch_nonce1 = s }
-        IF(EQ(j,10)){ ch_nonce2 = s }
+        ch_nonce[ ADD(j, 1) ] = s
         j = ADD(j, 1)
     }
     RETURN(0)

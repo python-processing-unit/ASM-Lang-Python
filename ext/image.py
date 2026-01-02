@@ -15,6 +15,7 @@ import os
 import struct
 import sys
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Tuple, Optional
 
 import numpy as np
@@ -114,6 +115,75 @@ def _alpha_blend_pixel(
     dest_arr[x, y, 1] = _Val(TYPE_INT, int(out_g))
     dest_arr[x, y, 2] = _Val(TYPE_INT, int(out_b))
     dest_arr[x, y, 3] = _Val(TYPE_INT, int(out_a))
+
+
+def _tensor_to_int_image(img, rule: str, interpreter, location) -> np.ndarray:
+    """Return an int64 view of an image tensor after type validation."""
+    interpreter.builtins._ensure_tensor_ints(img, rule, location)
+    shape = tuple(img.shape)
+    total = int(np.prod(shape))
+    arr_view = img.data.reshape(shape)
+    flat_iter = (int(v.value) for v in arr_view.flatten())
+    ints = np.fromiter(flat_iter, dtype=np.int64, count=total)
+    return ints.reshape(shape)
+
+
+def _value_tensor_from_ints(int_arr: np.ndarray):
+    from interpreter import TYPE_INT, TYPE_TNS, Tensor, Value
+
+    ints = np.asarray(int_arr)
+    flat_objs = [Value(TYPE_INT, int(v)) for v in ints.flatten()]
+    data = np.array(flat_objs, dtype=object)
+    shape = [int(ints.shape[0]), int(ints.shape[1]), int(ints.shape[2])]
+    return Value(TYPE_TNS, Tensor(shape=shape, data=data))
+
+
+def _resize_image_int(img_int: np.ndarray, target_w: int, target_h: int, *, antialiasing: bool) -> np.ndarray:
+    """Vectorized resize (nearest or bilinear) on an int image array shaped (w,h,4)."""
+    src_w, src_h, _ = img_int.shape
+    if antialiasing:
+        src = img_int.astype(float)
+        xs = (np.arange(target_w, dtype=float) + 0.5) * (src_w / float(target_w)) - 0.5
+        ys = (np.arange(target_h, dtype=float) + 0.5) * (src_h / float(target_h)) - 0.5
+
+        x0 = np.floor(xs).astype(int)
+        x1 = x0 + 1
+        wx = xs - x0
+        x0 = np.clip(x0, 0, src_w - 1)
+        x1 = np.clip(x1, 0, src_w - 1)
+        wx0 = 1.0 - wx
+
+        y0 = np.floor(ys).astype(int)
+        y1 = y0 + 1
+        wy = ys - y0
+        y0 = np.clip(y0, 0, src_h - 1)
+        y1 = np.clip(y1, 0, src_h - 1)
+        wy0 = 1.0 - wy
+
+        x0g, y0g = np.meshgrid(x0, y0, indexing="ij")
+        x1g, y1g = np.meshgrid(x1, y1, indexing="ij")
+        wx0g, wxg = np.meshgrid(wx0, wx, indexing="ij")
+        wy0g, wyg = np.meshgrid(wy0, wy, indexing="ij")
+
+        v00 = src[x0g, y0g]
+        v10 = src[x1g, y0g]
+        v01 = src[x0g, y1g]
+        v11 = src[x1g, y1g]
+
+        out = (
+            v00 * (wy0g[..., None] * wx0g[..., None])
+            + v10 * (wy0g[..., None] * wxg[..., None])
+            + v01 * (wyg[..., None] * wx0g[..., None])
+            + v11 * (wyg[..., None] * wxg[..., None])
+        )
+        return np.clip(np.rint(out), 0, 255).astype(np.int32)
+
+    sx = ((np.arange(target_w, dtype=float) + 0.5) * (src_w / float(target_w)) - 0.5).round().astype(int)
+    sy = ((np.arange(target_h, dtype=float) + 0.5) * (src_h / float(target_h)) - 0.5).round().astype(int)
+    sx = np.clip(sx, 0, src_w - 1)
+    sy = np.clip(sy, 0, src_h - 1)
+    xg, yg = np.meshgrid(sx, sy, indexing="ij")
+    return img_int[xg, yg].astype(np.int32)
 
 
 # ---- Windows GDI+ fast path ----
@@ -487,62 +557,29 @@ def _op_blit(interpreter, args, _arg_nodes, _env, location):
         new_data = np.array(dest.data.flat, dtype=object)
         return Value(TYPE_TNS, Tensor(shape=list(dest.shape), data=new_data))
 
-    # Ensure integers in image tensors
-    interpreter.builtins._ensure_tensor_ints(src, "BLIT", location)
-    interpreter.builtins._ensure_tensor_ints(dest, "BLIT", location)
+    # Vectorized per-pixel blend on int arrays
+    src_int = _tensor_to_int_image(src, "BLIT", interpreter, location)
+    dst_int = _tensor_to_int_image(dest, "BLIT", interpreter, location)
 
-    # Work with reshaped views for ease
-    src_arr = src.data.reshape(tuple(src.shape))
-    dst_arr = dest.data.reshape(tuple(dest.shape))
+    out = dst_int.copy()
+    src_slice = src_int[src_x0 : src_x0 + over_w, src_y0 : src_y0 + over_h, :]
+    dst_slice = out[dst_x0 : dst_x0 + over_w, dst_y0 : dst_y0 + over_h, :]
 
-    # Copy destination into new array we can mutate
-    new_arr = dst_arr.copy()
+    if mixalpha:
+        sa = np.clip(src_slice[..., 3], 0, 255).astype(np.int64)
+        inv_sa = 255 - sa
+        out_rgb = (sa[..., None] * src_slice[..., :3] + inv_sa[..., None] * dst_slice[..., :3]) // 255
+        out_a = sa + (dst_slice[..., 3] * inv_sa) // 255
+        dst_slice[..., :3] = out_rgb
+        dst_slice[..., 3] = out_a
+    else:
+        mask = src_slice[..., 3] != 0
+        if mask.any():
+            # boolean mask applies on first two axes; trailing channel axis kept
+            dst_slice[mask] = src_slice[mask]
 
-    # Cache commonly used callables/constructors to speed inner loops
-    _expect_int = interpreter._expect_int
-    _Val = Value
-    _TINT = TYPE_INT
-
-    for ry in range(over_h):
-        src_ry = src_y0 + ry
-        dst_ry = dst_y0 + ry
-        for rx in range(over_w):
-            src_rx = src_x0 + rx
-            dst_rx = dst_x0 + rx
-
-            # source array is indexed as [x, y, c]
-            s_r = _expect_int(src_arr[src_rx, src_ry, 0], "BLIT", location)
-            s_g = _expect_int(src_arr[src_rx, src_ry, 1], "BLIT", location)
-            s_b = _expect_int(src_arr[src_rx, src_ry, 2], "BLIT", location)
-            s_a = _expect_int(src_arr[src_rx, src_ry, 3], "BLIT", location)
-
-            d_r = _expect_int(new_arr[dst_rx, dst_ry, 0], "BLIT", location)
-            d_g = _expect_int(new_arr[dst_rx, dst_ry, 1], "BLIT", location)
-            d_b = _expect_int(new_arr[dst_rx, dst_ry, 2], "BLIT", location)
-            d_a = _expect_int(new_arr[dst_rx, dst_ry, 3], "BLIT", location)
-
-            if mixalpha:
-                # Simple alpha-over blending where source alpha determines mix
-                sa = max(0, min(255, s_a))
-                inv_sa = 255 - sa
-                out_r = (sa * s_r + inv_sa * d_r) // 255
-                out_g = (sa * s_g + inv_sa * d_g) // 255
-                out_b = (sa * s_b + inv_sa * d_b) // 255
-                # Composite alpha: src + dest*(1-src)
-                out_a = sa + (d_a * inv_sa) // 255
-            else:
-                # If src pixel present (alpha > 0) replace, else keep dest
-                if s_a == 0:
-                    continue
-                out_r, out_g, out_b, out_a = s_r, s_g, s_b, s_a
-
-            new_arr[dst_rx, dst_ry, 0] = _Val(_TINT, int(out_r))
-            new_arr[dst_rx, dst_ry, 1] = _Val(_TINT, int(out_g))
-            new_arr[dst_rx, dst_ry, 2] = _Val(_TINT, int(out_b))
-            new_arr[dst_rx, dst_ry, 3] = _Val(_TINT, int(out_a))
-
-    flat = np.array(new_arr.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=list(dest.shape), data=flat))
+    out = np.clip(out, 0, 255).astype(np.int32)
+    return _value_tensor_from_ints(out)
 
 
 def _op_scale(interpreter, args, _arg_nodes, _env, location):
@@ -580,57 +617,9 @@ def _op_scale(interpreter, args, _arg_nodes, _env, location):
         flat = np.array(src.data.flat, dtype=object)
         return Value(TYPE_TNS, Tensor(shape=list(src.shape), data=flat))
 
-    interpreter.builtins._ensure_tensor_ints(src, "SCALE", location)
-
-    src_arr = src.data.reshape((src_w, src_h, 4))
-    out = np.empty((target_w, target_h, 4), dtype=object)
-    _expect_int = interpreter._expect_int
-    _Val = Value
-    _TINT = TYPE_INT
-
-    if antialiasing:
-        # Bilinear interpolation
-        scale_y = src_h / float(target_h)
-        scale_x = src_w / float(target_w)
-        for j in range(target_h):
-            src_y = (j + 0.5) * scale_y - 0.5
-            y0 = int(math.floor(src_y))
-            y1 = y0 + 1
-            wy = src_y - y0
-            wy0 = 1.0 - wy
-            y0_clamped = max(0, min(src_h - 1, y0))
-            y1_clamped = max(0, min(src_h - 1, y1))
-            for i in range(target_w):
-                src_x = (i + 0.5) * scale_x - 0.5
-                x0 = int(math.floor(src_x))
-                x1 = x0 + 1
-                wx = src_x - x0
-                wx0 = 1.0 - wx
-                x0_clamped = max(0, min(src_w - 1, x0))
-                x1_clamped = max(0, min(src_w - 1, x1))
-                # sample four neighbors and blend — src_arr is [x,y,c]
-                for c in range(4):
-                    v00 = _expect_int(src_arr[x0_clamped, y0_clamped, c], "SCALE", location)
-                    v10 = _expect_int(src_arr[x1_clamped, y0_clamped, c], "SCALE", location)
-                    v01 = _expect_int(src_arr[x0_clamped, y1_clamped, c], "SCALE", location)
-                    v11 = _expect_int(src_arr[x1_clamped, y1_clamped, c], "SCALE", location)
-                    val = (v00 * (wy0 * wx0) + v10 * (wy0 * wx) + v01 * (wy * wx0) + v11 * (wy * wx))
-                    iv = int(round(val))
-                    iv = 0 if iv < 0 else (255 if iv > 255 else iv)
-                    out[i, j, c] = _Val(_TINT, iv)
-    else:
-        # Nearest-neighbor
-        for j in range(target_h):
-            src_y = int(round((j + 0.5) * (src_h / float(target_h)) - 0.5))
-            sy = max(0, min(src_h - 1, src_y))
-            for i in range(target_w):
-                src_x = int(round((i + 0.5) * (src_w / float(target_w)) - 0.5))
-                sx = max(0, min(src_w - 1, src_x))
-                for c in range(4):
-                    out[i, j, c] = _Val(_TINT, int(_expect_int(src_arr[sx, sy, c], "SCALE", location)))
-
-    flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[target_w, target_h, 4], data=flat))
+    src_int = _tensor_to_int_image(src, "SCALE", interpreter, location)
+    out_int = _resize_image_int(src_int, target_w, target_h, antialiasing=bool(antialiasing))
+    return _value_tensor_from_ints(out_int)
 
 
 def _op_resize(interpreter, args, _arg_nodes, _env, location):
@@ -657,57 +646,9 @@ def _op_resize(interpreter, args, _arg_nodes, _env, location):
         flat = np.array(src.data.flat, dtype=object)
         return Value(TYPE_TNS, Tensor(shape=list(src.shape), data=flat))
 
-    interpreter.builtins._ensure_tensor_ints(src, "RESIZE", location)
-
-    src_arr = src.data.reshape((src_w, src_h, 4))
-    out = np.empty((target_w, target_h, 4), dtype=object)
-    _expect_int = interpreter._expect_int
-    _Val = Value
-    _TINT = TYPE_INT
-
-    if antialiasing:
-        # Bilinear interpolation (absolute target dimensions)
-        scale_y = src_h / float(target_h)
-        scale_x = src_w / float(target_w)
-        for j in range(target_h):
-            src_y = (j + 0.5) * scale_y - 0.5
-            y0 = int(math.floor(src_y))
-            y1 = y0 + 1
-            wy = src_y - y0
-            wy0 = 1.0 - wy
-            y0_clamped = max(0, min(src_h - 1, y0))
-            y1_clamped = max(0, min(src_h - 1, y1))
-            for i in range(target_w):
-                src_x = (i + 0.5) * scale_x - 0.5
-                x0 = int(math.floor(src_x))
-                x1 = x0 + 1
-                wx = src_x - x0
-                wx0 = 1.0 - wx
-                x0_clamped = max(0, min(src_w - 1, x0))
-                x1_clamped = max(0, min(src_w - 1, x1))
-                # sample four neighbors and blend — src_arr is [x,y,c]
-                for c in range(4):
-                    v00 = _expect_int(src_arr[x0_clamped, y0_clamped, c], "RESIZE", location)
-                    v10 = _expect_int(src_arr[x1_clamped, y0_clamped, c], "RESIZE", location)
-                    v01 = _expect_int(src_arr[x0_clamped, y1_clamped, c], "RESIZE", location)
-                    v11 = _expect_int(src_arr[x1_clamped, y1_clamped, c], "RESIZE", location)
-                    val = (v00 * (wy0 * wx0) + v10 * (wy0 * wx) + v01 * (wy * wx0) + v11 * (wy * wx))
-                    iv = int(round(val))
-                    iv = 0 if iv < 0 else (255 if iv > 255 else iv)
-                    out[i, j, c] = _Val(_TINT, iv)
-    else:
-        # Nearest-neighbor
-        for j in range(target_h):
-            src_y = int(round((j + 0.5) * (src_h / float(target_h)) - 0.5))
-            sy = max(0, min(src_h - 1, src_y))
-            for i in range(target_w):
-                src_x = int(round((i + 0.5) * (src_w / float(target_w)) - 0.5))
-                sx = max(0, min(src_w - 1, src_x))
-                for c in range(4):
-                    out[i, j, c] = _Val(_TINT, int(_expect_int(src_arr[sx, sy, c], "RESIZE", location)))
-
-    flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[target_w, target_h, 4], data=flat))
+    src_int = _tensor_to_int_image(src, "RESIZE", interpreter, location)
+    out_int = _resize_image_int(src_int, target_w, target_h, antialiasing=bool(antialiasing))
+    return _value_tensor_from_ints(out_int)
 
 
 def _op_rotate(interpreter, args, _arg_nodes, _env, location):
@@ -834,31 +775,14 @@ def _op_grayscale(interpreter, args, _arg_nodes, _env, location):
         raise ASMRuntimeError("GRAYSCALE expects a 3D image tensor with 4 channels", location=location, rewrite_rule="GRAYSCALE")
 
     w, h, _ = img.shape
-    interpreter.builtins._ensure_tensor_ints(img, "GRAYSCALE", location)
-    arr = img.data.reshape((w, h, 4))
-    out = np.empty((w, h, 4), dtype=object)
-    _expect_int = interpreter._expect_int
-    _Val = Value
-    _TINT = TYPE_INT
-    for x in range(w):
-        for y in range(h):
-            r = _expect_int(arr[x, y, 0], "GRAYSCALE", location)
-            g = _expect_int(arr[x, y, 1], "GRAYSCALE", location)
-            b = _expect_int(arr[x, y, 2], "GRAYSCALE", location)
-            a = _expect_int(arr[x, y, 3], "GRAYSCALE", location)
-            # Standard luminance
-            lum = int(round(0.299 * r + 0.587 * g + 0.114 * b))
-            if lum < 0:
-                lum = 0
-            elif lum > 255:
-                lum = 255
-            out[x, y, 0] = _Val(_TINT, lum)
-            out[x, y, 1] = _Val(_TINT, lum)
-            out[x, y, 2] = _Val(_TINT, lum)
-            out[x, y, 3] = _Val(_TINT, a)
+    int_arr = _tensor_to_int_image(img, "GRAYSCALE", interpreter, location)
+    rgb = int_arr[:, :, :3].astype(float)
+    lum = np.clip(np.rint(rgb @ np.array([0.299, 0.587, 0.114])), 0, 255).astype(np.int32)
 
-    flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[w, h, 4], data=flat))
+    out_int = np.empty((w, h, 4), dtype=np.int32)
+    out_int[:, :, 0:3] = lum[..., None]
+    out_int[:, :, 3] = int_arr[:, :, 3]
+    return _value_tensor_from_ints(out_int)
 
 
 def _op_blur(interpreter, args, _arg_nodes, _env, location):
@@ -879,54 +803,25 @@ def _op_blur(interpreter, args, _arg_nodes, _env, location):
         flat = np.array(img.data.flat, dtype=object)
         return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
 
-    interpreter.builtins._ensure_tensor_ints(img, "BLUR", location)
-    arr = img.data.reshape((w, h, 4)).astype(object)
-    _expect_int = interpreter._expect_int
-    _Val = Value
-    _TINT = TYPE_INT
+    int_img = _tensor_to_int_image(img, "BLUR", interpreter, location)
 
-    # Build 1D gaussian kernel
     sigma = max(0.5, radius / 2.0)
     ksize = radius * 2 + 1
-    kernel = [0.0] * ksize
-    sum_k = 0.0
-    for i in range(ksize):
-        x = i - radius
-        v = math.exp(-(x * x) / (2.0 * sigma * sigma))
-        kernel[i] = v
-        sum_k += v
-    kernel = [v / sum_k for v in kernel]
+    kernel = np.array([math.exp(-((i - radius) ** 2) / (2.0 * sigma * sigma)) for i in range(ksize)], dtype=float)
+    kernel /= kernel.sum()
 
-    # Horizontal then vertical separable convolution
-    tmp = np.empty((w, h, 4), dtype=float)
-    # horizontal pass (along x)
-    for y in range(h):
-        for x in range(w):
-            for c in range(4):
-                acc = 0.0
-                for k in range(ksize):
-                    sx = x + (k - radius)
-                    sx_clamped = max(0, min(w - 1, sx))
-                    val = int(_expect_int(arr[sx_clamped, y, c], "BLUR", location))
-                    acc += kernel[k] * val
-                tmp[x, y, c] = acc
+    # Horizontal pass (axis 0) with edge padding
+    padded_x = np.pad(int_img.astype(float), ((radius, radius), (0, 0), (0, 0)), mode="edge")
+    stacked_x = np.stack([padded_x[i : i + w, :, :] for i in range(ksize)], axis=0)
+    tmp = np.tensordot(kernel, stacked_x, axes=(0, 0))
 
-    out = np.empty((w, h, 4), dtype=object)
-    # vertical pass (along y)
-    for y in range(h):
-        for x in range(w):
-            for c in range(4):
-                acc = 0.0
-                for k in range(ksize):
-                    sy = y + (k - radius)
-                    sy_clamped = max(0, min(h - 1, sy))
-                    acc += kernel[k] * tmp[x, sy_clamped, c]
-                iv = int(round(acc))
-                iv = 0 if iv < 0 else (255 if iv > 255 else iv)
-                out[x, y, c] = _Val(_TINT, iv)
+    # Vertical pass (axis 1) with edge padding
+    padded_y = np.pad(tmp, ((0, 0), (radius, radius), (0, 0)), mode="edge")
+    stacked_y = np.stack([padded_y[:, i : i + h, :] for i in range(ksize)], axis=0)
+    out = np.tensordot(kernel, stacked_y, axes=(0, 0))
 
-    flat = np.array(out.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=[w, h, 4], data=flat))
+    out_int = np.clip(np.rint(out), 0, 255).astype(np.int32)
+    return _value_tensor_from_ints(out_int)
 
 
 def _op_polygon(interpreter, args, _arg_nodes, _env, location):
@@ -1412,7 +1307,9 @@ def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
 
     if len(args) != 3:
         raise ASMRuntimeError("REPLACE_COLOR expects 3 arguments", location=location, rewrite_rule="REPLACE_COLOR")
-    img = interpreter._expect_tns(args[0], "REPLACE_COLOR", location)
+    # Keep the original Value for the fast-return case
+    img_val = args[0]
+    img = interpreter._expect_tns(img_val, "REPLACE_COLOR", location)
     src_col_t = interpreter._expect_tns(args[1], "REPLACE_COLOR", location)
     dst_col_t = interpreter._expect_tns(args[2], "REPLACE_COLOR", location)
 
@@ -1425,10 +1322,8 @@ def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
     if len(img.shape) != 3 or img.shape[2] != 4:
         raise ASMRuntimeError("REPLACE_COLOR expects a 3D image tensor with 4 channels", location=location, rewrite_rule="REPLACE_COLOR")
 
-    w, h, _ = img.shape
-    interpreter.builtins._ensure_tensor_ints(img, "REPLACE_COLOR", location)
-    src_arr = img.data.reshape((w, h, 4))
-    new_arr = src_arr.copy()
+    # Convert to a compact integer view for fast vectorized comparisons
+    img_int = _tensor_to_int_image(img, "REPLACE_COLOR", interpreter, location)
 
     s_arr = src_col_t.data.reshape(tuple(src_col_t.shape))
     d_arr = dst_col_t.data.reshape(tuple(dst_col_t.shape))
@@ -1440,51 +1335,45 @@ def _op_replace_color(interpreter, args, _arg_nodes, _env, location):
     s_has_alpha = (src_col_t.shape[0] == 4)
     s_a = interpreter._expect_int(s_arr[3], "REPLACE_COLOR", location) if s_has_alpha else None
 
-    # Extract destination color components
-    d_r = interpreter._expect_int(d_arr[0], "REPLACE_COLOR", location)
-    d_g = interpreter._expect_int(d_arr[1], "REPLACE_COLOR", location)
-    d_b = interpreter._expect_int(d_arr[2], "REPLACE_COLOR", location)
+    # Extract destination color components (clamped to 0..255)
+    d_r = _clamp_channel(interpreter._expect_int(d_arr[0], "REPLACE_COLOR", location))
+    d_g = _clamp_channel(interpreter._expect_int(d_arr[1], "REPLACE_COLOR", location))
+    d_b = _clamp_channel(interpreter._expect_int(d_arr[2], "REPLACE_COLOR", location))
     d_has_alpha = (dst_col_t.shape[0] == 4)
-    d_a = interpreter._expect_int(d_arr[3], "REPLACE_COLOR", location) if d_has_alpha else None
+    d_a = _clamp_channel(interpreter._expect_int(d_arr[3], "REPLACE_COLOR", location)) if d_has_alpha else None
 
-    # Clamp destination channels now
-    d_r = _clamp_channel(d_r)
-    d_g = _clamp_channel(d_g)
-    d_b = _clamp_channel(d_b)
-    if d_has_alpha:
-        d_a = _clamp_channel(d_a)
+    # Build match mask using the compact int view
+    match_mask = (img_int[:, :, 0] == s_r) & (img_int[:, :, 1] == s_g) & (img_int[:, :, 2] == s_b)
+    if s_has_alpha:
+        match_mask &= (img_int[:, :, 3] == s_a)
 
-    for y in range(h):
-        for x in range(w):
-            p_r = interpreter._expect_int(new_arr[x, y, 0], "REPLACE_COLOR", location)
-            p_g = interpreter._expect_int(new_arr[x, y, 1], "REPLACE_COLOR", location)
-            p_b = interpreter._expect_int(new_arr[x, y, 2], "REPLACE_COLOR", location)
-            p_a = interpreter._expect_int(new_arr[x, y, 3], "REPLACE_COLOR", location)
+    # Fast-path: if nothing matches, return the original tensor Value unchanged
+    if not match_mask.any():
+        return img_val
 
-            match = False
-            if s_has_alpha:
-                # exact RGBA match
-                if p_r == s_r and p_g == s_g and p_b == s_b and p_a == s_a:
-                    match = True
-            else:
-                # RGB match, alpha is treated as wildcard (matches any alpha)
-                if p_r == s_r and p_g == s_g and p_b == s_b:
-                    match = True
+    # Otherwise, mutate a shallow copy of the original Value objects so we only
+    # allocate new Value() objects for pixels that actually change.
+    shape = tuple(img.shape)
+    arr_view = img.data.reshape(shape)
+    out_view = arr_view.copy()
 
-            if not match:
-                continue
+    xs, ys = np.nonzero(match_mask)
+    n = xs.size
+    if n:
+        # Create replacement Value objects only for matched pixels
+        vr = [Value(TYPE_INT, int(d_r)) for _ in range(n)]
+        vg = [Value(TYPE_INT, int(d_g)) for _ in range(n)]
+        vb = [Value(TYPE_INT, int(d_b)) for _ in range(n)]
+        out_view[xs, ys, 0] = vr
+        out_view[xs, ys, 1] = vg
+        out_view[xs, ys, 2] = vb
+        if d_has_alpha:
+            va = [Value(TYPE_INT, int(d_a)) for _ in range(n)]
+            out_view[xs, ys, 3] = va
 
-            # Replace channels. If dst is RGB-only, preserve original alpha.
-            new_arr[x, y, 0] = Value(TYPE_INT, int(d_r))
-            new_arr[x, y, 1] = Value(TYPE_INT, int(d_g))
-            new_arr[x, y, 2] = Value(TYPE_INT, int(d_b))
-            if d_has_alpha:
-                new_arr[x, y, 3] = Value(TYPE_INT, int(d_a))
-            else:
-                new_arr[x, y, 3] = Value(TYPE_INT, int(p_a))
-
-    flat = np.array(new_arr.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
+    # Flatten back to the interpreter's Tensor data layout and return
+    out_flat = out_view.flatten().copy()
+    return Value(TYPE_TNS, Tensor(shape=[int(shape[0]), int(shape[1]), int(shape[2])], data=out_flat))
 
 
 def _op_thresh_generic(interpreter, args, _arg_nodes, _env, location, channel: int, rule: str):
@@ -1516,25 +1405,17 @@ def _op_thresh_generic(interpreter, args, _arg_nodes, _env, location, channel: i
         raise ASMRuntimeError(f"{rule} expects a 3D image tensor with 4 channels", location=location, rewrite_rule=rule)
 
     w, h, _ = img.shape
-    interpreter.builtins._ensure_tensor_ints(img, rule, location)
-    arr = img.data.reshape((w, h, 4))
-    new_arr = arr.copy()
+    arr_int = _tensor_to_int_image(img, rule, interpreter, location)
+    mask = arr_int[:, :, channel] == thresh
 
-    _Val = Value
-    _TINT = TYPE_INT
+    if mask.any():
+        arr_int[mask, 0] = _clamp_channel(d_r)
+        arr_int[mask, 1] = _clamp_channel(d_g)
+        arr_int[mask, 2] = _clamp_channel(d_b)
+        if d_has_alpha:
+            arr_int[mask, 3] = _clamp_channel(d_a)
 
-    for y in range(h):
-        for x in range(w):
-            p_val = interpreter._expect_int(new_arr[x, y, channel], rule, location)
-            if p_val == thresh:
-                new_arr[x, y, 0] = _Val(_TINT, int(_clamp_channel(d_r)))
-                new_arr[x, y, 1] = _Val(_TINT, int(_clamp_channel(d_g)))
-                new_arr[x, y, 2] = _Val(_TINT, int(_clamp_channel(d_b)))
-                if d_has_alpha:
-                    new_arr[x, y, 3] = _Val(_TINT, int(_clamp_channel(d_a)))
-
-    flat = np.array(new_arr.flatten(), dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=flat))
+    return _value_tensor_from_ints(arr_int)
 
 
 def _op_thresh_a(interpreter, args, _arg_nodes, _env, location):
@@ -2054,28 +1935,32 @@ def _op_invert(interpreter, args, _arg_nodes, _env, location):
         raise ASMRuntimeError("INVERT expects a 3D image tensor with 4 channels", location=location, rewrite_rule="INVERT")
 
     w, h, _ = img.shape
-    # Ensure underlying values are integers
-    interpreter.builtins._ensure_tensor_ints(img, "INVERT", location)
-    src_arr = img.data.reshape((w, h, 4))
+    int_arr = _tensor_to_int_image(img, "INVERT", interpreter, location)
 
-    # Extract integer channel values efficiently using NumPy's fromiter
-    # (avoids repeated Python-level per-pixel checks inside nested loops).
-    total = w * h * 4
-    flat_iter = (int(v.value) for v in src_arr.flatten())
-    flat_ints = np.fromiter(flat_iter, dtype=np.int64, count=total)
-    int_arr = flat_ints.reshape((w, h, 4))
-
-    # Invert RGB channels (clamped to 0..255), preserve alpha channel
-    rgb = int_arr[:, :, :3] & 0xFF
-    inv_rgb = 255 - rgb
+    # Parallelize the invert on width-chunks. NumPy releases the GIL during
+    # elementwise ops so thread workers can run concurrently.
     out_arr = np.empty_like(int_arr)
-    out_arr[:, :, :3] = inv_rgb
-    out_arr[:, :, 3] = int_arr[:, :, 3]
+    pixel_count = w * h
+    max_workers = min(max(1, os.cpu_count() or 1), max(1, w))
+    # For small images, threading overhead dominates; keep it single-threaded.
+    if pixel_count < 65_536 or max_workers == 1:
+        out_arr[:, :, :3] = 255 - (int_arr[:, :, :3] & 0xFF)
+        out_arr[:, :, 3] = int_arr[:, :, 3]
+    else:
+        chunk = (w + max_workers - 1) // max_workers
+        ranges = [(start, min(start + chunk, w)) for start in range(0, w, chunk) if start < w]
 
-    # Build Value objects for the result (one allocation via list comprehension)
-    flat_objs = [Value(TYPE_INT, int(v)) for v in out_arr.flatten()]
-    data = np.array(flat_objs, dtype=object)
-    return Value(TYPE_TNS, Tensor(shape=list(img.shape), data=data))
+        def _invert_slice(lo: int, hi: int) -> None:
+            rgb = int_arr[lo:hi, :, :3] & 0xFF
+            out_arr[lo:hi, :, :3] = 255 - rgb
+            out_arr[lo:hi, :, 3] = int_arr[lo:hi, :, 3]
+
+        with ThreadPoolExecutor(max_workers=len(ranges)) as pool:
+            futures = [pool.submit(_invert_slice, lo, hi) for lo, hi in ranges]
+            for fut in futures:
+                fut.result()
+
+    return _value_tensor_from_ints(out_arr)
 
 
 def _op_edge(interpreter, args, _arg_nodes, _env, location):
@@ -2114,14 +1999,50 @@ def _op_edge(interpreter, args, _arg_nodes, _env, location):
         kernel /= kernel.sum()
 
         # horizontal pass: convolve along x for each y (use numpy.convolve C implementation)
+        nx, ny = src.shape[0], src.shape[1]
         tmp = np.empty_like(src, dtype=float)
-        for y in range(src.shape[1]):
-            tmp[:, y] = np.convolve(src[:, y], kernel, mode='same')
 
-        # vertical pass: convolve along y for each x
+        # Threaded helper to process a y-range for horizontal pass
+        def _h_worker(y0: int, y1: int) -> None:
+            for y in range(y0, y1):
+                tmp[:, y] = np.convolve(src[:, y], kernel, mode='same')
+
+        # vertical pass helper to process an x-range
+        def _v_worker(x0: int, x1: int, out_arr: np.ndarray) -> None:
+            for x in range(x0, x1):
+                out_arr[x, :] = np.convolve(tmp[x, :], kernel, mode='same')
+
+        # Decide whether to parallelize based on size to avoid overhead on tiny images
+        cpu = max(1, os.cpu_count() or 1)
+        # Parallelize across the smaller dimension for better load balance
+        horiz_workers = min(cpu, max(1, ny))
+        vert_workers = min(cpu, max(1, nx))
+
+        if nx * ny < 65_536 or (horiz_workers == 1 and vert_workers == 1):
+            # small image: do sequential
+            for y in range(ny):
+                tmp[:, y] = np.convolve(src[:, y], kernel, mode='same')
+            out = np.empty_like(src, dtype=float)
+            for x in range(nx):
+                out[x, :] = np.convolve(tmp[x, :], kernel, mode='same')
+            return out
+
+        # Horizontal pass in parallel (split y axis)
+        h_chunk = (ny + horiz_workers - 1) // horiz_workers
+        h_ranges = [(i, min(i + h_chunk, ny)) for i in range(0, ny, h_chunk)]
+        with ThreadPoolExecutor(max_workers=len(h_ranges)) as pool:
+            futures = [pool.submit(_h_worker, lo, hi) for lo, hi in h_ranges]
+            for f in futures:
+                f.result()
+
+        # Vertical pass in parallel (split x axis)
         out = np.empty_like(src, dtype=float)
-        for x in range(src.shape[0]):
-            out[x, :] = np.convolve(tmp[x, :], kernel, mode='same')
+        v_chunk = (nx + vert_workers - 1) // vert_workers
+        v_ranges = [(i, min(i + v_chunk, nx)) for i in range(0, nx, v_chunk)]
+        with ThreadPoolExecutor(max_workers=len(v_ranges)) as pool:
+            futures = [pool.submit(_v_worker, lo, hi, out) for lo, hi in v_ranges]
+            for f in futures:
+                f.result()
 
         return out
 

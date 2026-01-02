@@ -17,14 +17,17 @@
 FUNC MEAN(TNS:values):FLT{
     INT: n = TLEN(values, 1)
     ASSERT( GT(n, 0) )
-    # accumulate as integer/float using DIV later
-    INT: idx = 1
-    INT: sum = 0
-    WHILE( LTE(idx, n) ){
-        sum = ADD(sum, values[idx])
-        idx = ADD(idx, 1)
+    # parallelize: write per-index contributions in PARFOR then reduce
+    TNS: parts = TNS([n], 0)
+    PARFOR(idx, n){
+        parts[idx] = values[idx]
     }
-    # return sum / n as FLT
+    INT: sum = 0
+    INT: i = 1
+    WHILE( LTE(i, n) ){
+        sum = ADD(sum, parts[i])
+        i = ADD(i, 1)
+    }
     RETURN( DIV( FLT(sum), FLT(n) ) )
 }
 
@@ -173,12 +176,16 @@ FUNC VARIANCE(TNS:values, INT:sample):FLT{
         i = ADD(i, 1)
     }
     INT: mean = DIV(sum, n)
-    # sum squared deviations
+    # sum squared deviations — compute per-index squared deviations in parallel then reduce
+    TNS: sdevs = TNS([n], 0)
+    PARFOR(idx, n){
+        INT: d = SUB(values[idx], mean)
+        sdevs[idx] = MUL(d, d)
+    }
     INT: ssd = 0
     i = 1
     WHILE( LTE(i, n) ){
-        INT: d = SUB(values[i], mean)
-        ssd = ADD( ssd, MUL(d, d) )
+        ssd = ADD(ssd, sdevs[i])
         i = ADD(i, 1)
     }
     INT: denom = n
@@ -319,24 +326,33 @@ FUNC DESCRIBE(TNS:values):TNS{
     INT: n = TLEN(values, 1)
     ASSERT( GT(n, 0) )
     # count, mean, stdev (population), min, max
+    # parallelize: copy values into a temp tensor then reduce for sum/min/max
+    TNS: parts = TNS([n], 0)
+    PARFOR(idx, n){
+        parts[idx] = values[idx]
+    }
     INT: sum = 0
     INT: i = 1
-    INT: mn = values[1]
-    INT: mx = values[1]
+    INT: mn = parts[1]
+    INT: mx = parts[1]
     WHILE( LTE(i, n) ){
-        INT: v = values[i]
+        INT: v = parts[i]
         sum = ADD(sum, v)
         IF( LT(v, mn) ){ mn = v }
         IF( GT(v, mx) ){ mx = v }
         i = ADD(i, 1)
     }
     INT: mean = DIV(sum, n)
-    # compute variance (population)
+    # compute variance (population) — compute per-index squared deviations in parallel then reduce
+    TNS: sdevs = TNS([n], 0)
+    PARFOR(idx, n){
+        INT: d = SUB(parts[idx], mean)
+        sdevs[idx] = MUL(d, d)
+    }
     INT: ssd = 0
     i = 1
     WHILE( LTE(i, n) ){
-        INT: d = SUB(values[i], mean)
-        ssd = ADD(ssd, MUL(d, d))
+        ssd = ADD(ssd, sdevs[i])
         i = ADD(i, 1)
     }
     INT: var = DIV(ssd, n)

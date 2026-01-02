@@ -149,9 +149,19 @@ The language provides `IF`, `ELSEIF`, and `ELSE` constructs for conditional exec
 
 Conditions accept `INT`, `STR`, or `TNS`. `STR` conditions are first converted to `INT` using the `INT` built-in rules (empty -> 0; binary string -> that integer; other non-empty -> 1) before truthiness is checked. A `TNS` condition is true if any of its elements is true by the `INT`/`STR` truthiness rules.
 
-Loops are provided via `WHILE` and `FOR`. A `WHILE` loop has the form `WHILE(condition){ block }`. On each iteration, the condition is evaluated; if it is non-zero, the block executes and control returns to the start of the loop to evaluate the condition again. If the condition evaluates to zero, the loop terminates and execution continues with the next statement.
+Loops are provided via `WHILE`, `FOR`, and `PARFOR`. A `WHILE` loop has the form `WHILE(condition){ block }`. On each iteration, the condition is evaluated; if it is non-zero, the block executes and control returns to the start of the loop to evaluate the condition again. If the condition evaluates to zero, the loop terminates and execution continues with the next statement.
 
 The `FOR` construct has the form `FOR(counter, target){ block }`, where `counter` is an identifier and `target` is an expression. At loop entry, `target` is evaluated once to a value `T` (must be `INT`), and `counter` is initialized to the `INT` value `0`, creating it as an `INT` if necessary. The loop then repeats: if the current value of `counter` is greater than or equal to `T`, the loop exits; otherwise, the block executes and `counter` is incremented by `1` before the next iteration.
+
+Note on scoping: the loop `counter` is loop-local and does not persist in the enclosing environment after the `FOR` completes (any prior binding with the same name is restored). Any other identifiers that are declared (first assigned with a `TYPE:` declaration) inside the `FOR` body are bound in the enclosing environment (that is, they persist after the loop finishes).
+
+The `PARFOR` construct has the form `PARFOR(counter, target){ block }`. Semantically, the interpreter evaluates `target` once at loop entry (must be `INT`) yielding `T`, then concurrently executes `T` independent iterations indexed from `1` to `T` (inclusive). Each iteration runs the loop `block` with the loop `counter` bound to its iteration index. The interpreter waits for all iterations to complete before proceeding to the statement following the `PARFOR` block. Iteration bodies execute in parallel and may run on different threads; therefore, writes to shared mutable identifiers are subject to race conditions. To avoid unintended races, iteration-local state should be stored in identifiers that are created inside the iteration body or otherwise synchronized by user code. Runtime errors raised inside an iteration are reported and will cause the `PARFOR` to fail after all iterations have joined; the first such error is re-raised to the caller.
+
+Note on scoping: as with `FOR`, the loop `counter` is iteration-local and does not persist in the enclosing environment after the `PARFOR` completes. Identifiers (other than the counter) that are declared inside iteration bodies are nevertheless bound in the enclosing environment; when iterations finish, the interpreter merges those bindings back into the enclosing scope. Because iterations execute concurrently, concurrent writes to the same identifier are subject to race conditions and the final value is implementation-defined (the reference implementation uses a last-writer-wins merge strategy).
+
+  Loop-control semantics inside `PARFOR` differ from sequential loops in the following ways:
+  - `CONTINUE()` ends the current iteration only; it does not affect other concurrently running iterations.
+  - `BREAK(n)` terminates the entire `PARFOR`. When a `BREAK` is executed in any iteration, the interpreter signals termination of the `PARFOR`, stops starting any further iterations, waits for currently-running iterations to complete, and then behaves as if `BREAK(n)` had executed at the `PARFOR` site (that is, a `BreakSignal` is propagated to outer loop handlers). Note that because iterations execute concurrently on threads, iterations already executing when the `BREAK` occurred will run to completion unless they themselves check user-level synchronization; `BREAK` prevents additional iterations from starting and ensures the `PARFOR` as a whole terminates as soon as the in-flight iterations finish.
 
 BREAK statement: The language provides a statement form `BREAK(n)` that terminates enclosing loops. When executed inside a loop body (either a `WHILE` or `FOR` loop), `BREAK(n)` breaks out of the innermost `n` loops and resumes execution at the statement following those loops. The argument `n` is evaluated as an integer at runtime and must be strictly positive. If `n ≤ 0` the interpreter raises a runtime error. If `n` is greater than the number of currently-enclosing loops (that is, the statement would escape all surrounding loops), the interpreter raises a runtime error rather than silently terminating the program. Using `BREAK` outside of any loop context similarly results in an error. The exact error type and reporting information are implementation-defined but should be recorded in the state log to make replay and debugging deterministic.
 
@@ -440,10 +450,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `ISFLT(SYMBOL: name):INT` — 1 if `name` is bound and has type `FLT`, otherwise 0.
 
 ### Rounding
-- `ROUND(FLT: float, STR: mode="floor", INT: ndigits=0):FLT` — Round `float` to `ndigits` places right of the radix point (binary places; `ndigits` may be negative). Modes are:
-
 - `ROUND(FLT: float, STR: mode="floor", INT: ndigits=0):FLT` — Round `float` to `ndigits` places right of the radix point (binary places; `ndigits` may be negative). When exactly two arguments are supplied and the second is an `INT`, it is treated as `ndigits` with the mode defaulting to `"floor"`. Modes are:
-
   - `"floor"` — round toward $-\infty$
   - `"ceiling"` or `"ceil"` — round toward $+\infty$
   - `"zero"` — round toward zero
@@ -499,7 +506,8 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `IF(condition){ block }` (optional `ELSEIF(condition){ block }` ... `ELSE{ block }`)
 - `WHILE(condition){ block }`
 - `FOR(counter, INT: target){ block }` ; `counter` initialized to 0, loop until counter >= target
-`FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R{ block }` ; typed function definition with return type R (`INT`, `STR`, or `TNS`); optional defaults use `Tk:arg=expr` and must appear only after all positional parameters. Functions with return type `TNS` must explicitly execute `RETURN(value)`; there is no implicit default tensor value.
+- `PARFOR(counter, INT: target){ block }` ; concurrently execute `target` iterations with `counter` bound to `1..T`. Iteration bodies run in parallel (threaded) and may race on shared mutable identifiers. `CONTINUE()` ends the current iteration only; `BREAK(n)` terminates the entire `PARFOR` (prevents starting further iterations, waits for in-flight iterations to finish, then propagates the `BreakSignal`). Runtime errors raised inside iterations are collected and the first such error is re-raised after all iterations join.
+- `FUNC name(T1:arg1, T2:arg2, ..., TN:argN):R{ block }` ; typed function definition with return type R (`INT`, `STR`, or `TNS`); optional defaults use `Tk:arg=expr` and must appear only after all positional parameters. Functions with return type `TNS` must explicitly execute `RETURN(value)`; there is no implicit default tensor value.
 - `RETURN(ANY: a)` ; return from function with value `a`
 - `POP(SYMBOL: x)` — Convenience statement combining `RETURN` and `DEL`: when executed inside a function body it retrieves the current value of the identifier `x`, deletes the binding `x` from the environment (so subsequent references are an error), and returns the retrieved value to the caller. Using `POP` outside of a function is a runtime error.
 - `BREAK(INT: n)` ; break out of the innermost `n` enclosing loops; raises a runtime error if `n` ≤ 0 or if `n` is greater than the current loop nesting depth
