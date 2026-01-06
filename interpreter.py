@@ -52,6 +52,7 @@ from parser import (
     TensorSetStatement,
     WhileStatement,
     ContinueStatement,
+    TryStatement,
 )
 
 
@@ -3721,6 +3722,49 @@ class Interpreter:
         while i < n_statements:
             statement = statements[i]
             emit_event("before_statement", self, statement, env)
+            # TryStatement is handled directly here so that catch binding
+            # lifetime does not escape the following statement sequencing.
+            if type(statement) is TryStatement:
+                log_step(rule=statement.__class__.__name__, location=statement.location)
+                try:
+                    self._execute_block(statement.try_block.statements, env)
+                except ASMRuntimeError as err:
+                    # Optionally bind symbol and run catch block
+                    if statement.catch_symbol is not None:
+                        name = statement.catch_symbol
+                        # Find existing binding (if any) and record it for restore
+                        found_env = env._find_env(name)
+                        prev_val = None
+                        had_prev = False
+                        if found_env is not None:
+                            prev_val = found_env.values.get(name)
+                            had_prev = True
+                        # Shadow by inserting into the current environment's values
+                        env.values[name] = Value(TYPE_STR, err.message)
+                        try:
+                            self._execute_block(statement.catch_block.statements, env)
+                        finally:
+                            # Restore previous binding if present, otherwise remove the shadow
+                            try:
+                                if had_prev and prev_val is not None:
+                                    # Restore into the environment where it was found
+                                    assert found_env is not None
+                                    found_env.values[name] = prev_val
+                                else:
+                                    # Remove the shadow binding from the current env
+                                    if name in env.values:
+                                        del env.values[name]
+                            except ASMRuntimeError:
+                                raise
+                    else:
+                        # No symbol to bind: run catch block without binding
+                        self._execute_block(statement.catch_block.statements, env)
+                except Exception as exc:
+                    # Non-ASMRuntimeError should propagate as usual
+                    raise
+                i += 1
+                emit_event("after_statement", self, statement, env)
+                continue
             if type(statement) is GotopointStatement:
                 log_step(rule=statement.__class__.__name__, location=statement.location)
                 gid = eval_expr(statement.expression, env)

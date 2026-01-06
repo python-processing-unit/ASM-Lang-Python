@@ -20,6 +20,8 @@ class Token:
 
 
 KEYWORDS = {
+    "TRY",
+    "CATCH",
     "IF",
     "ELSEIF",
     "ELSE",

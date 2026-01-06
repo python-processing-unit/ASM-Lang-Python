@@ -169,6 +169,16 @@ Tensor elements can be reassigned with the indexed form `identifier[i1,...,iN] =
 
 The language provides `IF`, `ELSEIF`, and `ELSE` constructs for conditional execution. An `IF` statement has the general form `IF(condition){ block }`. Optional chained branches may follow: one or more `ELSEIF(condition){ block }` clauses and an optional terminal `ELSE{ block }` clause. An `ELSEIF` or `ELSE` must immediately follow an `IF` or another `ELSEIF`; otherwise it is a syntax error. At most one `ELSE` may appear in a given chain. Evaluation proceeds by first evaluating the condition of the initial `IF`. If it is non-zero, the associated block executes and the rest of the chain is skipped. Otherwise, the conditions of subsequent `ELSEIF` clauses are evaluated in order until one is non-zero; its block then executes and the chain terminates. If no `IF` or `ELSEIF` condition is satisfied and an `ELSE` is present, the `ELSE` block executes; if there is no `ELSE`, no block in the chain executes.
 
+Exception handling: `TRY` / `CATCH` blocks
+
+The language provides a simple structured exception handling form using `TRY{ ... }CATCH{ ... }` or the alternate `TRY{ ... }CATCH(SYMBOL: name){ ... }` form. A `TRY` block must be immediately followed by a single `CATCH` block (optionally separated by newlines). If a `TRY` is not followed by a `CATCH`, parsing fails. A `CATCH` that does not immediately follow a `TRY` is a syntax error.
+
+Semantics: the interpreter executes the `TRY` block normally. If the `TRY` block completes without a runtime error, execution proceeds to the statement following the `CATCH` block (the `CATCH` block is skipped). If a runtime error (an interpreter-level runtime exception) occurs anywhere during execution of the `TRY` block, normal execution of the `TRY` block stops and the associated `CATCH` block executes. Runtime errors raised inside the `CATCH` block (or propagated from it) behave as normal runtime errors and will be reported or propagated further.
+
+`CATCH(SYMBOL: name)` binding: when using the parameterized `CATCH` form the interpreter creates a temporary symbol `name` (of static type `STR`) visible in the lexical environment of the `CATCH` block whose value is the error message string describing the runtime error that triggered the handler. The temporary symbol shadows any existing binding with the same name for the duration of the `CATCH` block and is removed (or restored to its prior value) immediately after the `CATCH` block completes. The symbol is always a `STR` containing the textual error message; if the handler wishes to inspect richer error metadata it must do so via built-in facilities exposed by the runtime.
+
+Notes and error rules: `TRY`/`CATCH` only intercept interpreter-level runtime errors (for example: undefined identifier, type mismatch, divide-by-zero). `ASYNC` blocks execute on background threads; runtime errors raised inside an `ASYNC` are reported via error hooks and do not synchronously transfer control to nearby `CATCH` blocks in the main thread. Nested `TRY`/`CATCH` works as expected: the innermost enclosing `TRY` with its directly-following `CATCH` handles errors raised within its `TRY` block.
+
 Conditions accept `INT`, `STR`, or `TNS`. `STR` conditions are first converted to `INT` using the `INT` built-in rules (empty -> 0; binary string -> that integer; other non-empty -> 1) before truthiness is checked. A `TNS` condition is true if any of its elements is true by the `INT`/`STR` truthiness rules.
 
 Loops are provided via `WHILE`, `FOR`, and `PARFOR`. A `WHILE` loop has the form `WHILE(condition){ block }`. On each iteration, the condition is evaluated; if it is non-zero, the block executes and control returns to the start of the loop to evaluate the condition again. If the condition evaluates to zero, the loop terminates and execution continues with the next statement.
@@ -380,7 +390,7 @@ All operators and functions, both built-in and user-defined, share a uniform fun
 
 Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number of indices must equal the tensor's dimension count. Indices are one-based; 0 is invalid. Negative indices address from the end of the dimension (for example, -1 is the last element). Attempting to index with an out-of-range position raises a runtime error.
 
-### Function / Operator Signatures (expression position)
+### 12.1 Function / Operator Signatures (expression position)
 - `INPUT():STR` or `INPUT(STR: s):STR` ; returns a `STR` from the input stream; use `INT` to coerce to an integer when needed. The interpreter prints the prompt inline (so a REPL or other output sink can display it) before reading a line of input. The I/O event is recorded for replay and, when a prompt was supplied, the recorded event includes the prompt text.
 - `PRINT(INT|STR: a1, INT|STR: a2, ..., INT|STR: aN):INT` ; prints `INT`/`STR` arguments (side-effect), tensors are rejected; returns `INT` 0
 - `RUN(STR: s)` ; Run a string as an ASM-Lang program within the current environment;
@@ -412,7 +422,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 
 - `IN(ANY: value, TNS: tensor):INT` ; returns `1` if `value` is equal to any element of `tensor` (using the language's equality semantics), otherwise `0`.
 
-### Arithmetic (`INT` only)
+### 12.2 Arithmetic (`INT` only)
 - `ADD(INT: a, INT: b):INT` ; a + b
 - `SUB(INT: a, INT: b):INT` ; a - b
 - `MUL(INT:a, INT:b):INT` ; a * b
@@ -426,7 +436,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `GCD(INT: a, INT: b):INT` ; greatest common divisor of a and b
 - `LCM(INT: a, INT: b):INT` ; least common multiple of a and b
 
-### Bitwise / Boolean
+### 12.3 Bitwise / Boolean
 - `BAND(INT: a, INT: b):INT` ; bitwise AND
 - `BOR(INT: a, INT: b):INT` ; bitwise OR
 - `BXOR(INT: a, INT: b):INT` ; bitwise XOR
@@ -440,14 +450,14 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `NOT(ANY: a):INT` ; Boolean NOT
 - `BOOL(ANY: item):INT` ; returns the truthiness of `item` as `INT` (`INT`: non-zero -> `1`, `STR`: non-empty -> `1`, `TNS`: true if any element is true), otherwise `0`
 
-### Comparisons
+### 12.4 Comparisons
 - `EQ(ANY: a, ANY: b):INT` ; 1 if a == b else 0
 - `GT(INT|FLT: a, INT|FLT: b):INT` ; 1 if a > b else 0 (no mixing INT/FLT)
 - `LT(INT|FLT: a, INT|FLT: b):INT` ; 1 if a < b else 0 (no mixing INT/FLT)
 - `GTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if a >= b else 0 (no mixing INT/FLT)
 - `LTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if a <= b else 0 (no mixing INT/FLT)
 
-### Aggregates / Utilities
+### 12.5 Aggregates / Utilities
 - `MAX(INT|FLT|STR: a1, ..., INT|FLT|STR: aN):INT|FLT|STR` ; numeric max for `INT`/`FLT`, longest for `STR`; supplying tensors or mixing types is an error
 - `MIN(INT|FLT|STR: a1, ..., INT|FLT|STR: aN):INT|FLT|STR` ; numeric min for `INT`/`FLT`, shortest for `STR`; supplying tensors or mixing types is an error
 - `SUM(INT|FLT: a1, ..., INT|FLT: aN):INT|FLT` ; sum of the arguments (no mixing INT/FLT)
@@ -457,7 +467,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `JOIN(INT|STR: a1, INT|STR: a2, ..., INT|STR: aN):INT|STR` ; `INT` -> concatenate binary spellings with consistent sign; `STR` -> concatenate strings; mixing `INT` and `STR` or supplying tensors raises an error
 - `PROD(INT|FLT: a1, ..., INT|FLT: aN):INT|FLT` ; product of the arguments (no mixing INT/FLT)
 
-### Tensor operations
+### 12.6 Tensor operations
 - `SHAPE(TNS: tensor):TNS` — Returns the tensor's shape as a 1D `TNS` (vector) of `INT` lengths (one entry per dimension).
 - `TLEN(TNS: tensor, INT: dim):INT` — Returns the length of the specified 1-based dimension. Errors if `dim` is out of range.
 - `FLIP(INT|STR: obj):INT|STR` — For `INT` input, returns an `INT` whose binary-digit spelling is the reverse of the absolute-value binary spelling of `obj` (sign is preserved). For `STR` input, returns the character-reversed `STR`.
@@ -471,36 +481,36 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `MPROD(TNS: t1, ..., TNS: tN):TNS` — Elementwise product across tensors. Shapes must match; elements must be all `INT` or all `FLT` (no mixing).
 - `TADD/TSSUB/TMUL/TDIV/TPOW(TNS: x, INT|FLT: y):TNS` — Tensor-scalar arithmetic. Tensor elements and scalar must both be `INT` or both be `FLT` (no mixing). Division by zero is an error.
 
-### Map operations
+### 12.7 Map operations
 - `KEYS(MAP: map): TNS` - Return a 1-D `TNS` containing each of the keys in `map`, in insertion order. Each element of the returned tensor has the native key type (`INT`, `FLT`, or `STR`).
 - `VALUES(MAP: map): TNS` - Return a 1-D `TNS` containing each of the values in `map`, in insertion order. Each element of the returned tensor is the stored value and preserves its type (`INT`, `FLT`, `STR`, `TNS`, or `MAP`).
 - `KEYIN(INT|FLT|STR: key, MAP: map):INT` - Returns `1` if `map` contains `key` (matching by type and value), otherwise `0`.
 - `VALUEIN(ANY: value, MAP: map):INT` - Returns `1` if any value stored in `map` is equal to `value` using the language's equality semantics, otherwise `0`.
 
-### Concurrency
+### 12.8 Concurrency
 
 - `PARALLEL(TNS: functions):INT` — Execute each element of `functions` in parallel. Each element must evaluate to a `FUNC` value; the interpreter invokes each function with no arguments (in separate worker threads) and waits for all workers to complete. Returns `INT` 0 on success. If any element is not a `FUNC` or any worker raises an error, `PARALLEL` raises a runtime error (rewrite: `PARALLEL`) and the failing worker's error is propagated.
 
 - `PARALLEL(FUNC: f1, FUNC: f2, ...):INT` — Variadic form: accept one or more `FUNC` values as direct arguments. Behaviour is equivalent to the tensor form: each supplied function is invoked in parallel with no arguments and the call waits for completion; returns `INT` 0 on success or raises on error.
 
-### Logarithms
+### 12.9 Logarithms
 - `LOG(INT: a):INT` ; floor(log2(a)) for a > 0
 - `LOG(FLT: a):FLT` ; floor(log2(a)) for a > 0
 - `CLOG(INT: a):INT` ; ceil(log2(a)) for a > 0
 
-### Numeric conversions / predicates
+### 12.10 Numeric conversions / predicates
 - `INT(ANY: a):INT` — Explicit conversion to integer. If `a` is `FLT`, conversion truncates toward zero.
 - `FLT(ANY: a):FLT` — Explicit conversion to float.
 - `ISFLT(SYMBOL: name):INT` — 1 if `name` is bound and has type `FLT`, otherwise 0.
 
-### Rounding
+### 12.11 Rounding
 - `ROUND(FLT: float, STR: mode="floor", INT: ndigits=0):FLT` — Round `float` to `ndigits` places right of the radix point (binary places; `ndigits` may be negative). When exactly two arguments are supplied and the second is an `INT`, it is treated as `ndigits` with the mode defaulting to `"floor"`. Modes are:
   - `"floor"` — round toward $-\infty$
   - `"ceiling"` or `"ceil"` — round toward $+\infty$
   - `"zero"` — round toward zero
   - `"logical"` or `"half-up"` — round half away from zero
 
-### Module operations:
+### 12.12 Module operations:
 - `IMPORT(MODULE: name)` or `IMPORT(MODULE: name, SYMBOL: alias)` — Loads another source file and exposes it as a distinct module namespace. When an optional alias identifier is supplied, the imported module's bindings are exposed under the `alias` prefix rather than the module's own name (for example, `IMPORT(mod, ali)` makes `ali.F()` valid while `mod.F()` is not).
 - `IMPORT_PATH(STR: path)` — Loads an ASM-Lang module from the absolute filesystem `path` provided as a `STR`. The argument must be an absolute path to a `.asmln` source file. The imported module is treated the same as `IMPORT` with respect to parsing, execution isolation, function/module caching, and companion extension loading (companion `<module>.asmxt` alongside the resolved file and a built-in `ext/<module>.py` are both checked and loaded if present). The module's basename (filename without extension) is used as the module identifier for qualifying exported bindings.
 
@@ -524,28 +534,28 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
   module-qualified names they register).
 - `EXPORT(SYMBOL: symbol, MODULE: module):INT` — Adds the caller's binding for the identifier `symbol` into the namespace of the imported module named by the identifier `module`. The first argument must be an identifier (not a string literal); its current value in the caller's environment is copied into the imported module's namespace and becomes available as the qualified name `module.symbol` in the caller's environment. The second argument must be an identifier naming a previously-imported module; if the module has not been imported yet, the interpreter raises a runtime error (rewrite: EXPORT). `EXPORT` returns `INT` 0 on success.
 
-### File operations:
+### 12.13 File operations:
 - `READFILE(STR: path, STR: coding=\"UTF-8\"):STR` — Reads the file at `path` and returns its contents as a `STR`. Supported `coding` values (case-insensitive) are `UTF-8`, `UTF-8 BOM`, `UTF-16 LE`, `UTF-16 BE`, `ANSI` (Windows-1252 on Windows, Latin-1 elsewhere), `binary` (alias `bin`), and `hexadecimal` (alias `hex`). Text codings decode with replacement on invalid bytes; `UTF-8` tolerates and strips a BOM if present. `binary` returns an 8-bit-per-byte bitstring; `hexadecimal` returns a lowercase hexadecimal string. If the file cannot be opened or read, the interpreter raises a runtime error (rewrite: `READFILE`).
 - `WRITEFILE(STR: blob, STR: path, STR: coding=\"UTF-8\"):INT` — Writes `blob` to `path` using the same `coding` options as `READFILE`. Text codings write in the specified encoding (`UTF-8 BOM` emits a BOM; `ANSI` maps to Windows-1252 on Windows, Latin-1 elsewhere). `binary` expects a bitstring of 0/1 characters whose length is a multiple of 8; `hexadecimal` expects valid hexadecimal. On I/O failure the call returns `INT` 0; invalid coding or malformed binary/hex data raises a runtime error (rewrite: `WRITEFILE`).
 - `EXISTFILE(STR: path):INT` — Returns `INT` 1 when a filesystem object exists at `path`, otherwise returns `INT` 0. The argument must be a `STR`.
 
-### Symbol Freezing:
+### 12.14 Symbol Freezing:
 - `FREEZE(SYMBOL: symbol):INT` — Marks the identifier `symbol` as frozen. The first argument must be an identifier (not a string literal). On success `FREEZE` returns `INT` 0. Once a binding is frozen, any attempt to reassign it (via `=` assignment) or to delete it (`DEL`) raises a runtime error (assign attempts signal rewrite: `ASSIGN`; deletion attempts signal rewrite: `DEL`). `FREEZE` locates the binding in the usual lexical environment chain and freezes that specific binding; if the identifier is undefined, the call raises a runtime error (rewrite: `FREEZE`).
 - `THAW(SYMBOL: symbol):INT` — Unfreezes a previously-frozen identifier. The single argument must be an identifier (not a string literal). On success `THAW` returns `INT` 0. If the identifier is undefined the call raises a runtime error (rewrite: `THAW`). If the identifier has been permanently frozen by `PERMAFREEZE`, calling `THAW` raises a runtime error and the binding remains frozen (rewrite: `THAW`). Calling `THAW` on an identifier that is not frozen is a no-op and succeeds.
 - `PERMAFREEZE(SYMBOL: symbol):INT` — Permanently freezes the identifier `symbol`. The argument must be an identifier (not a string literal). On success `PERMAFREEZE` returns `INT` 0. A permanently-frozen identifier cannot later be thawed; attempts to call `THAW` on such an identifier raise a runtime error (rewrite: `THAW`). As with `FREEZE`, `PERMAFREEZE` locates the binding in the lexical environment chain and applies the permanent-freeze to that specific binding; if the identifier is undefined the call raises a runtime error (rewrite: `PERMAFREEZE`).
 - `FROZEN(SYMBOL: symbol):INT` — Returns `INT` -1 when the named identifier binding is permanently frozen (was previously frozen via `PERMAFREEZE`). If the binding is frozen but not permanently (was frozen via `FREEZE`) the call returns `INT` 1. Otherwise it returns `INT` 0. The single argument must be an identifier (not a string literal). If the identifier is undefined the call returns `INT` 0.
 - `PERMAFROZEN(SYMBOL: symbol):INT` — Returns `INT` 1 when the named identifier binding is permanently frozen (was previously frozen via `PERMAFREEZE`), otherwise returns `INT` 0. The single argument must be an identifier (not a string literal). If the identifier is undefined the call returns `INT` 0.
 
-### Command Line:
+### 12.15 Command Line:
 - `CL(`STR`: command):INT` — Executes the provided `command` string using the host shell and returns the subprocess exit code as an `INT`. The `command` argument must be a `STR`. On a failure to start the subprocess (for example if the system cannot invoke a shell), the interpreter raises a runtime error (rewrite: CL). The call records a `CL` event in the execution I/O log containing the command text and returned exit code, enabling deterministic logging and replay.
 - `SHUSH():INT` — Suppresses forwarding of console output to the configured output sink. While shushed, calls that would normally print to the console (for example, `PRINT` and output captured from `CL`) do not forward their text to the interpreter's output sink, though the interpreter continues to record the corresponding I/O events in the execution log for deterministic replay. `INPUT` prompts are still forwarded even when shushed. The `RUN`  operator temporarily disables shushing for the duration of the executed source, so any output produced by code run via `RUN` is forwarded regardless of the current shush state. `SHUSH` takes no arguments and returns `INT` 0 on success.
 - `UNSHUSH():INT` — Re-enables forwarding of console output that was previously suppressed by `SHUSH`. Calling `UNSHUSH` clears the shush state so subsequent side-effecting calls that normally produce console output (for example, `PRINT` and output captured from `CL`) are forwarded to the configured output sink. `UNSHUSH` takes no arguments and returns `INT` 0 on success. The interpreter continues to record I/O events in the execution log for deterministic replay; `INPUT` prompts and `RUN` behaviour are unchanged (that is, `INPUT` is always forwarded and `RUN` still temporarily disables shushing while it runs).
 
-### Host and environment information:
+### 12.16 Host and environment information:
 - `OS():STR` — Returns a short, lowercase ASCII string identifying the host operating-system family. Typical values include `win` for Windows, `linux` for Linux, `macos` for macOS, and `unix` for other Unix-like platforms. The call takes no arguments and returns a `STR`.
 - `ARGV():TNS` — Returns the interpreter's argument vector as a one-dimensional `TNS` of `STR`. The tensor's elements are the command-line argument strings supplied to the process, in the same order as the process `argv`, with index 1 holding the interpreter's invocation entry (TNS indices are 1-based).
 
-### Control / Function / Statement Signatures (statement position)
+### 12.17 Control / Function / Statement Signatures (statement position)
 - Assignment: `TYPE : identifier = expression` on first use; subsequent assignments omit TYPE but must match the original type. TYPE is `INT`, `FLT`, `STR`, or `TNS`. Tensor elements may be reassigned with `identifier[i1,...,iN] = expression` (indices are 1-based with negative-index support, and the stored type at that element must not change).
 - Block: `{ statement1 ... statementN }`
 - `IF(condition){ block }` (optional `ELSEIF(condition){ block }` ... `ELSE{ block }`)
@@ -560,8 +570,10 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 - `GOTOPOINT(n)` ; register a gotopoint with identifier `n` at this statement's location (identifier may be `INT` or `STR`) (n evaluated at runtime). Gotopoints are visible across the containing function or top-level scope rather than being restricted to a single lexical block.
 - `GOTO(n)` ; jump to a previously-registered gotopoint with identifier `n` (`INT` or `STR`) within the same function or top-level scope; runtime error if not registered in that scope
 - `ASYNC{ block }` ; execute `block` asynchronously in a separate thread (while sharing the same namespace); the caller continues executing immediately without waiting for the async block to complete. Any uncaught errors in the async block are logged to the interpreter's error log but do not affect the caller.
+- `TRY{ block }CATCH{ block }` ; execute `block` in the `TRY` and, if an interpreter-level runtime error occurs during the `TRY` block, stop the `TRY` and execute the directly-following `CATCH` block. If no error occurs, the `CATCH` block is skipped.
+- `TRY{ block }CATCH(SYMBOL: name){ block }` ; like the previous form but bind a temporary `STR` symbol `name` visible inside the `CATCH` block containing the error message. The temporary symbol shadows any existing binding for `name` and is restored or removed after the `CATCH` block completes.
 
-### Notes
+### 12.18 Notes
 - Built-ins are statically typed. Boolean contexts treat `INT` 0 as false and non-zero as true; `FLT` is false when 0.0 and true otherwise; `STR` is false when empty and true when non-empty unless a rule explicitly converts via `INT`. A `TNS` is true if any element is true by those rules.
 - Argument evaluation order: left-to-right.
 - User-defined functions use the same call syntax as built-ins; keyword arguments are permitted only after positional arguments and only for parameters that declare defaults. Built-ins reject keyword arguments except that `READFILE` and `WRITEFILE` accept an optional `coding=` keyword. When a keyword parameter is omitted, its default expression is evaluated at call time in the function's defining environment.

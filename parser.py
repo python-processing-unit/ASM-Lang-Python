@@ -137,6 +137,13 @@ class AsyncStatement(Statement):
     block: Block
 
 
+@dataclass(slots=True)
+class TryStatement(Statement):
+    try_block: Block
+    catch_symbol: Optional[str]
+    catch_block: Block
+
+
 class Expression(Node):
     pass
 
@@ -263,6 +270,10 @@ class Parser:
         token = self._peek()
         if self._looks_like_index_assignment():
             return self._parse_index_assignment()
+        if token.type == "TRY":
+            return self._parse_try()
+        if token.type == "CATCH":
+            raise ASMParseError(f"CATCH must immediately follow a TRY block at line {token.line}")
         if token.type == "FUNC":
             return self._parse_func()
         if token.type == "IF":
@@ -452,6 +463,41 @@ class Parser:
         keyword = self._consume("ASYNC")
         block: Block = self._parse_block()
         return AsyncStatement(location=self._location_from_token(keyword), block=block)
+
+    def _parse_try(self) -> TryStatement:
+        keyword = self._consume("TRY")
+        try_block: Block = self._parse_block()
+        # Allow newlines between the TRY block and its required CATCH.
+        self._consume_newlines()
+        if self._peek().type != "CATCH":
+            tok = self._peek()
+            raise ASMParseError(
+                f"TRY must be followed by a CATCH block (found {tok.type}) at line {tok.line}"
+            )
+        self._consume("CATCH")
+        catch_symbol: Optional[str] = None
+        if self._match("LPAREN"):
+            # Syntax: CATCH(sym){...} or CATCH() for no symbol.
+            if self._peek().type == "RPAREN":
+                # Empty parentheses: CATCH()
+                self._consume("RPAREN")
+            elif self._peek().type == "IDENT":
+                # Single identifier: CATCH(name)
+                sym = self._consume("IDENT")
+                self._consume("RPAREN")
+                catch_symbol = sym.value
+            else:
+                tok = self._peek()
+                raise ASMParseError(
+                    f"Invalid CATCH syntax (found {tok.type}) at line {tok.line}"
+                )
+        catch_block: Block = self._parse_block()
+        return TryStatement(
+            location=self._location_from_token(keyword),
+            try_block=try_block,
+            catch_symbol=catch_symbol,
+            catch_block=catch_block,
+        )
 
     def _parse_block(self) -> Block:
         opening = self._peek().type
