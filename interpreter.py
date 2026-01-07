@@ -576,6 +576,8 @@ class Builtins:
         self._register_custom("TFLIP", 2, 2, self._tflip)
         self._register_custom("SCAT", 3, 3, self._scatter)
         self._register_custom("PARALLEL", 1, None, self._parallel)
+        self._register_custom("SER", 1, 1, self._serialize)
+        self._register_custom("UNSER", 1, 1, self._unserialize)
 
     def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
         if arity == 1:
@@ -2501,6 +2503,158 @@ class Builtins:
         if len(args) != 1:
             raise ASMRuntimeError("DEEPCOPY expects one argument", location=location, rewrite_rule="DEEPCOPY")
         return self._deep_copy_value(interpreter, args[0], location)
+
+    def _serialize(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        # SER(ANY: obj):STR -> JSON text representing typed value
+        if len(args) != 1:
+            raise ASMRuntimeError("SER expects one argument", location=location, rewrite_rule="SER")
+
+        def ser_val(v: Value):
+            t = v.type
+            if t == TYPE_INT:
+                assert isinstance(v.value, int)
+                n = v.value
+                if n == 0:
+                    digits = "0"
+                else:
+                    digits = bin(abs(n))[2:]
+                return {"t": "INT", "v": ("-" + digits) if n < 0 else digits}
+            if t == TYPE_FLT:
+                assert isinstance(v.value, float)
+                return {"t": "FLT", "v": repr(v.value)}
+            if t == TYPE_STR:
+                assert isinstance(v.value, str)
+                return {"t": "STR", "v": v.value}
+            if t == TYPE_TNS:
+                tensor = self._expect_tns(v, "SER", location)
+                flat = tensor.data.ravel()
+                serialized = [ser_val(item) for item in flat]
+                return {"t": "TNS", "shape": list(tensor.shape), "v": serialized}
+            if t == TYPE_MAP:
+                m = v.value
+                assert isinstance(m, Map)
+                items = []
+                for k, vv in m.data.items():
+                    # k is (type, value)
+                    kt, kv = k
+                    if kt == TYPE_INT:
+                        if kv == 0:
+                            krep = "0"
+                        else:
+                            krep = ("-" + bin(abs(kv))[2:]) if kv < 0 else bin(kv)[2:]
+                        key_ser = {"t": "INT", "v": krep}
+                    elif kt == TYPE_FLT:
+                        key_ser = {"t": "FLT", "v": repr(kv)}
+                    elif kt == TYPE_STR:
+                        key_ser = {"t": "STR", "v": kv}
+                    else:
+                        raise ASMRuntimeError("SER: unsupported map key type", location=location, rewrite_rule="SER")
+                    items.append({"k": key_ser, "v": ser_val(vv)})
+                return {"t": "MAP", "v": items}
+            # For FUNC and THR and other values, emit a descriptive form.
+            return {"t": t, "repr": str(v.value)}
+
+        try:
+            body = ser_val(args[0])
+            text = json.dumps(body, separators=(",", ":"))
+            return Value(TYPE_STR, text)
+        except ASMRuntimeError:
+            raise
+        except Exception as exc:
+            raise ASMRuntimeError(f"SER failed: {exc}", location=location, rewrite_rule="SER")
+
+    def _unserialize(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        # UNSER(STR: obj):ANY -> reverse of SER
+        if len(args) != 1:
+            raise ASMRuntimeError("UNSER expects one argument", location=location, rewrite_rule="UNSER")
+        s = args[0]
+        text = self._expect_str(s, "UNSER", location)
+
+        def deser_val(obj) -> Value:
+            if not isinstance(obj, dict) or "t" not in obj:
+                raise ASMRuntimeError("UNSER: invalid serialized form", location=location, rewrite_rule="UNSER")
+            t = obj["t"]
+            if t == "INT":
+                raw = obj.get("v", "0")
+                neg = False
+                if isinstance(raw, str) and raw.startswith("-"):
+                    neg = True
+                    raw = raw[1:]
+                if raw == "":
+                    ival = 0
+                else:
+                    ival = int(raw, 2)
+                if neg:
+                    ival = -ival
+                return Value(TYPE_INT, ival)
+            if t == "FLT":
+                raw = obj.get("v", "0.0")
+                try:
+                    f = float(raw)
+                except Exception:
+                    raise ASMRuntimeError("UNSER: invalid FLT literal", location=location, rewrite_rule="UNSER")
+                return Value(TYPE_FLT, f)
+            if t == "STR":
+                return Value(TYPE_STR, obj.get("v", ""))
+            if t == "TNS":
+                shape = obj.get("shape")
+                flat = obj.get("v", [])
+                if not isinstance(shape, list):
+                    raise ASMRuntimeError("UNSER: invalid TNS shape", location=location, rewrite_rule="UNSER")
+                vals = [deser_val(x) for x in flat]
+                arr = np.array(vals, dtype=object)
+                return Value(TYPE_TNS, Tensor(shape=list(shape), data=arr))
+            if t == "MAP":
+                items = obj.get("v", [])
+                if not isinstance(items, list):
+                    raise ASMRuntimeError("UNSER: invalid MAP body", location=location, rewrite_rule="UNSER")
+                m = Map()
+                for pair in items:
+                    key_obj = pair.get("k")
+                    val_obj = pair.get("v")
+                    if not isinstance(key_obj, dict) or "t" not in key_obj:
+                        raise ASMRuntimeError("UNSER: invalid MAP key", location=location, rewrite_rule="UNSER")
+                    kt = key_obj["t"]
+                    if kt == "INT":
+                        raw = key_obj.get("v", "0")
+                        neg = False
+                        if isinstance(raw, str) and raw.startswith("-"):
+                            neg = True
+                            raw = raw[1:]
+                        kval = int(raw, 2) if raw != "" else 0
+                        if neg:
+                            kval = -kval
+                    elif kt == "FLT":
+                        kval = float(key_obj.get("v", 0.0))
+                    elif kt == "STR":
+                        kval = key_obj.get("v", "")
+                    else:
+                        raise ASMRuntimeError("UNSER: unsupported MAP key type", location=location, rewrite_rule="UNSER")
+                    vval = deser_val(val_obj)
+                    m.data[(kt, kval)] = vval
+                return Value(TYPE_MAP, m)
+            # FUNC / THR cannot be reconstructed reliably
+            raise ASMRuntimeError(f"UNSER: cannot reconstruct type {t}", location=location, rewrite_rule="UNSER")
+
+        try:
+            obj = json.loads(text)
+        except Exception:
+            raise ASMRuntimeError("UNSER: invalid JSON", location=location, rewrite_rule="UNSER")
+        return deser_val(obj)
 
     def _frozen(
         self,
