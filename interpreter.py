@@ -535,6 +535,7 @@ class Builtins:
         self._register_custom("VALUES", 1, 1, self._values)
         self._register_custom("KEYIN", 2, 2, self._keyin)
         self._register_custom("VALUEIN", 2, 2, self._valuein)
+        self._register_custom("INV", 1, 1, self._inv)
         self._register_custom("EXPORT", 2, 2, self._export)
         self._register_custom("ISINT", 1, 1, self._isint)
         self._register_custom("ISFLT", 1, 1, self._isflt)
@@ -1257,6 +1258,49 @@ class Builtins:
             if interpreter._values_equal(needle, v):
                 return Value(TYPE_INT, 1)
         return Value(TYPE_INT, 0)
+
+    def _inv(
+        self,
+        _: "Interpreter",
+        args: List[Value],
+        __: List[Expression],
+        ___: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        # INV(MAP: map):MAP -> reverse key/value pairs. Values must be usable as keys.
+        val = args[0]
+        if val.type != TYPE_MAP:
+            raise ASMRuntimeError("INV expects a MAP argument", location=location, rewrite_rule="INV")
+
+        m = val.value
+        assert isinstance(m, Map)
+        out = Map()
+        for (key_type, key_val), entry_val in m.data.items():
+            # Map keys are always scalar; map values may be anything, but INV
+            # requires values to be legal keys.
+            if entry_val.type not in (TYPE_INT, TYPE_FLT, TYPE_STR):
+                raise ASMRuntimeError(
+                    "INV requires all map values to be INT, FLT, or STR",
+                    location=location,
+                    rewrite_rule="INV",
+                )
+            inv_key = (entry_val.type, entry_val.value)
+            if inv_key in out.data:
+                raise ASMRuntimeError(
+                    "INV cannot invert map with duplicate values",
+                    location=location,
+                    rewrite_rule="INV",
+                )
+            # Store the original key as the new value.
+            if key_type == TYPE_INT:
+                out.data[inv_key] = Value(TYPE_INT, key_val)
+            elif key_type == TYPE_FLT:
+                out.data[inv_key] = Value(TYPE_FLT, key_val)
+            elif key_type == TYPE_STR:
+                out.data[inv_key] = Value(TYPE_STR, key_val)
+            else:
+                raise ASMRuntimeError("INV encountered unsupported map key type", location=location, rewrite_rule="INV")
+        return Value(TYPE_MAP, out)
 
     # Boolean-like operators treating strings via emptiness
     def _and(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:

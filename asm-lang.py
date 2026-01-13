@@ -14,6 +14,10 @@ from parser import Parser, Statement
 
 import tkinter  # Ensure tkinter is available for GUI extensions
 
+def _print_error(msg: str) -> None:
+    """Print an error message to stderr prefixed with U+0007 (BEL)."""
+    print("\u0007" + str(msg), file=sys.stderr)
+
 
 def _print_internal_error(*, exc: BaseException, interpreter: Optional[Interpreter] = None, verbose: bool = False, traceback_json: bool = False) -> int:
     """Last-resort error handler.
@@ -37,15 +41,15 @@ def _print_internal_error(*, exc: BaseException, interpreter: Optional[Interpret
             if interpreter.logger.entries:
                 error.step_index = interpreter.logger.entries[-1].step_index
             formatter = TracebackFormatter(interpreter)
-            print(formatter.format_text(error, verbose=verbose), file=sys.stderr)
+            _print_error(formatter.format_text(error, verbose=verbose))
             if traceback_json:
-                print(formatter.to_json(error), file=sys.stderr)
+                _print_error(formatter.to_json(error))
             return 1
         except Exception:
             # If formatting itself fails, fall back to a simple one-liner.
             pass
 
-    print(message, file=sys.stderr)
+    _print_error(message)
     return 1
 
 
@@ -112,7 +116,7 @@ def run_repl(*, verbose: bool, services) -> int:
         try:
             return runner(ctx)
         except ASMExtensionError as exc:
-            print(f"ExtensionError: {exc}", file=sys.stderr)
+            _print_error(f"ExtensionError: {exc}")
             return 1
         except BaseException as exc:
             return _print_internal_error(exc=exc, interpreter=None, verbose=verbose)
@@ -127,7 +131,7 @@ def run_repl(*, verbose: bool, services) -> int:
             output_sink=_output_sink,
         )
     except ASMExtensionError as exc:
-        print(f"ExtensionError: {exc}", file=sys.stderr)
+        _print_error(f"ExtensionError: {exc}")
         return 1
     except BaseException as exc:
         return _print_internal_error(exc=exc, interpreter=None, verbose=verbose)
@@ -174,7 +178,7 @@ def run_repl(*, verbose: bool, services) -> int:
                     if interpreter.logger.entries:
                         error.step_index = interpreter.logger.entries[-1].step_index
                     formatter = TracebackFormatter(interpreter)
-                    print(formatter.format_text(error, verbose=interpreter.verbose), file=sys.stderr)
+                    _print_error(formatter.format_text(error, verbose=interpreter.verbose))
                     interpreter.call_stack = [global_frame]
             except ASMParseError:
                 # If a single-line parse fails, treat it as start of multi-line input
@@ -192,12 +196,12 @@ def run_repl(*, verbose: bool, services) -> int:
             except ExitSignal as sig:
                 return sig.code
             except ASMParseError as error:
-                print(f"ParseError: {error}", file=sys.stderr)
+                _print_error(f"ParseError: {error}")
             except ASMRuntimeError as error:
                 if interpreter.logger.entries:
                     error.step_index = interpreter.logger.entries[-1].step_index
                 formatter = TracebackFormatter(interpreter)
-                print(formatter.format_text(error, verbose=interpreter.verbose), file=sys.stderr)
+                _print_error(formatter.format_text(error, verbose=interpreter.verbose))
                 # reset call stack to single top-level frame to keep REPL usable
                 interpreter.call_stack = [global_frame]
             except BaseException as exc:
@@ -263,7 +267,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     try:
         services = load_runtime_services(ext_paths) if ext_paths else load_runtime_services([])
     except ASMExtensionError as exc:
-        print(f"ExtensionError: {exc}", file=sys.stderr)
+        _print_error(f"ExtensionError: {exc}")
         return 1
     except BaseException as exc:
         return _print_internal_error(exc=exc, interpreter=None, verbose=bool(getattr(args, "verbose", False)))
@@ -271,13 +275,13 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     program: Optional[str] = None
     if remaining:
         if len(remaining) > 1:
-            print("Too many non-extension inputs; expected a single program argument", file=sys.stderr)
+            _print_error("Too many non-extension inputs; expected a single program argument")
             return 1
         program = remaining[0]
 
     if program is None:
         if args.source_mode and not ext_paths:
-            print("-source requires a program string", file=sys.stderr)
+            _print_error("-source requires a program string")
             return 1
         # If only extensions are present, run REPL with the loaded extensions.
         return run_repl(verbose=args.verbose, services=services)
@@ -291,14 +295,14 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
             with open(filename, "r", encoding="utf-8") as handle:
                 source_text = handle.read()
         except OSError as exc:
-            print(f"Failed to read {filename}: {exc}", file=sys.stderr)
+            _print_error(f"Failed to read {filename}: {exc}")
             return 1
 
     interpreter: Optional[Interpreter] = None
     try:
         interpreter = Interpreter(source=source_text, filename=filename, verbose=args.verbose, services=services)
     except ASMExtensionError as exc:
-        print(f"ExtensionError: {exc}", file=sys.stderr)
+        _print_error(f"ExtensionError: {exc}")
         return 1
     except BaseException as exc:
         return _print_internal_error(exc=exc, interpreter=None, verbose=args.verbose, traceback_json=args.traceback_json)
@@ -306,15 +310,15 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     try:
         interpreter.run()
     except ASMParseError as error:
-        print(f"ParseError: {error}", file=sys.stderr)
+        _print_error(f"ParseError: {error}")
         return 1
     except ExitSignal as sig:
         return sig.code
     except ASMRuntimeError as error:
         formatter = TracebackFormatter(interpreter)
-        print(formatter.format_text(error, verbose=args.verbose), file=sys.stderr)
+        _print_error(formatter.format_text(error, verbose=args.verbose))
         if args.traceback_json:
-            print(formatter.to_json(error), file=sys.stderr)
+            _print_error(formatter.to_json(error))
         return 1
     except BaseException as exc:
         return _print_internal_error(exc=exc, interpreter=interpreter, verbose=args.verbose, traceback_json=args.traceback_json)

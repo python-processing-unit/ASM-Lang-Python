@@ -1,7 +1,7 @@
 IMPORT(prng)
 IMPORT(csprng)
 IMPORT(prime)
-IMPORT(decimal)
+IMPORT(numbers)
 IMPORT(path)
 IMPORT(image)
 IMPORT(gui)
@@ -60,13 +60,19 @@ FUNC STDLIB_TESTS():INT{
 
     PRINT("Prime library tests passed.")
 
-    # Decimal library tests
-    ASSERT(EQ(decimal.INT_TO_DEC(100),"4"))
-    ASSERT(EQ(decimal.DEC_TO_INT("4"),100))
-    ASSERT(EQ(decimal.INT_TO_DEC(-100),"-4"))
-    ASSERT(EQ(decimal.DEC_TO_INT("-4"),-100))
-
-    PRINT("Decimal library tests passed.")
+    # Numbers library tests
+    ASSERT( EQ(numbers.VALUE("10", 1010), 1010) )
+    ASSERT( EQ(numbers.VALUE("A", 10000), 1010) )
+    ASSERT( EQ(numbers.CONVERT("10", 1010, 10000), "A") )
+    ASSERT( EQ(numbers.CONVERT("A", 10000, 1010), "10") )
+    ASSERT( EQ(numbers.binary, 10) )
+    ASSERT( EQ(numbers.octal, 1000) )
+    ASSERT( EQ(numbers.decimal, 1010) )
+    ASSERT( EQ(numbers.hexadecimal, 10000) )
+    ASSERT( EQ(numbers.duotrigesimal, 100000) )
+    ASSERT( EQ(numbers.base32, 100000) )
+    ASSERT( EQ(numbers.base64, 1000000) )
+    PRINT("Numbers library tests passed.")
 
     # Path library tests
     ASSERT( EQ(path.NORMALIZE_PATH("a\\b\\c"), "a/b/c") )
@@ -78,6 +84,8 @@ FUNC STDLIB_TESTS():INT{
     ASSERT( EQ(path.DELEXT("foo"), "foo") )
     IF(EQ(OS(),"win")){
         ASSERT( EQ(path.TEMPFILE("myfile.txt"), "C:/Windows/Temp/myfile.txt") )
+    } ELSEIF (EQ(OS(),"linux")){
+        ASSERT( EQ(path.TEMPFILE("myfile.txt"), "/tmp/myfile.txt") )
     }
 
     PRINT("Path library tests passed.")

@@ -1,0 +1,220 @@
+# Number system conversion utilities for ASM-Lang
+#
+# API:
+# VALUE(STR: num, INT: base):INT
+# CONVERT(STR: num, INT: from, INT: to):STR
+
+MAP: digits = < ^
+    "0" = 0, ^
+    "1" = 1, ^
+    "2" = 10, ^
+    "3" = 11, ^
+    "4" = 100, ^
+    "5" = 101, ^
+    "6" = 110, ^
+    "7" = 111, ^
+    "8" = 1000, ^
+    "9" = 1001, ^
+    "A" = 1010, ^
+    "B" = 1011, ^
+    "C" = 1100, ^
+    "D" = 1101, ^
+    "E" = 1110, ^
+    "F" = 1111,  ^
+    "G" = 10000, ^
+    "H" = 10001, ^
+    "I" = 10010, ^
+    "J" = 10011, ^
+    "K" = 10100, ^
+    "L" = 10101, ^
+    "M" = 10110, ^
+    "N" = 10111, ^
+    "O" = 11000, ^
+    "P" = 11001, ^
+    "Q" = 11010, ^
+    "R" = 11011, ^
+    "S" = 11100, ^
+    "T" = 11101, ^
+    "U" = 11110, ^
+    "V" = 11111,  ^
+    "W" = 100000, ^
+    "X" = 100001, ^
+    "Y" = 100010, ^
+    "Z" = 100011, ^
+    "a" = 100100, ^
+    "b" = 100101, ^
+    "c" = 100110, ^
+    "d" = 100111, ^
+    "e" = 101000, ^
+    "f" = 101001, ^
+    "g" = 101010, ^
+    "h" = 101011, ^
+    "i" = 101100, ^
+    "j" = 101101, ^
+    "k" = 101110, ^
+    "l" = 101111, ^
+    "m" = 110000, ^
+    "n" = 110001, ^
+    "o" = 110010, ^
+    "p" = 110011, ^
+    "q" = 110100, ^
+    "r" = 110101, ^
+    "s" = 110110, ^
+    "t" = 110111, ^
+    "u" = 111000, ^
+    "v" = 111001, ^
+    "w" = 111010, ^
+    "x" = 111011, ^
+    "y" = 111100, ^
+    "z" = 111101, ^
+    "+" = 111110, ^
+    "_" = 111111  ^
+>
+
+MAP: rev = INV(digits) # reverse mapping of digits
+
+FUNC VALUE(STR: num, INT: base):INT{
+    IF(GT(base, 1000000)){
+        THROW("Base ", STR(base), " not supported. Max base is 1,000,000")
+    }
+    INT: value = 0
+    # Support optional leading '-' for negative values.  Detect the minus
+    # when it appears as the leftmost character during the digit loop so
+    # we don't rely on SLICE index conventions.
+    STR: s = num
+    INT: neg = 0
+    FOR(i, SLEN(s)){
+        INT: idx = SUB(SLEN(s), i)
+        STR: digit = SLICE(s, idx, idx)
+        # If the leftmost character is '-' treat as sign, otherwise error
+        IF(AND(EQ(digit, "-"), EQ(i, 1))){
+            neg = 1
+            CONTINUE()
+        }
+        IF(NOT(KEYIN(digit, digits))){
+            THROW(JOIN("Digit \"", digit, "\" not valid for base ", STR(base)))
+        }
+        ADD(@value, MUL(digits[digit], POW(base, idx)))
+        # compute internal binary value as digit*base^(position from right)
+    }
+    DEL(digit)
+    IF(EQ(neg, 1)){
+        MUL(@value, -1)
+    }
+    POP(value)
+}
+
+FUNC CONVERT(STR: num, INT: from, INT: to):STR{
+    # Support optional fractional part (radix point) without breaking
+    # existing integer-only behavior. If `num` contains a '.', split
+    # into integer and fractional parts and convert each appropriately.
+    STR: s = num
+    INT: dotpos = 0
+    # Find '.' by iterating characters left-to-right using the
+    # same right-indexing convention as VALUE (idx = SLEN(s) - i).
+    FOR(i, SLEN(s)){
+        INT: idx = SUB(SLEN(s), i)
+        STR: ch = SLICE(s, idx, idx)
+        IF(EQ(ch, ".")){
+            dotpos = i
+            BREAK(1)
+        }
+    }
+
+    STR: intpart = s
+    STR: fracpart = ""
+    IF(GT(dotpos, 0)){
+        # intpart is characters left of the dot. When dot is first
+        # character, use "0". Otherwise slice from left [0..dotpos-2].
+        IF(EQ(dotpos, 1)){
+            intpart = "0"
+        } ELSE {
+            STR: intpart = SLICE(s, SUB(SLEN(s), 1), SUB(ADD(SLEN(s), 1), dotpos))
+        }
+        # fracpart is characters right of the dot; slice from left
+        # [dotpos..SLEN(s)-1], which maps to right-indices [SLEN(s)-dotpos-1 .. 0].
+        IF(LT(dotpos, SLEN(s))){
+            fracpart = SLICE(s, SUB(SLEN(s), ADD(dotpos, 1)), 0)
+        } ELSE {
+            fracpart = ""
+        }
+    }
+
+    # Convert integer part (preserve sign handling and zero behavior)
+    INT: int_value = VALUE(intpart, from)
+    STR: int_result = ""
+    IF(AND(EQ(int_value, 0), EQ(fracpart, ""))){
+        DEL(num)
+        DEL(intpart)
+        DEL(fracpart)
+        RETURN("0")
+    }
+
+    INT: neg = 0
+    IF(LT(int_value, 0)){
+        neg = 1
+        NEG(@int_value)
+    }
+    WHILE(GT(int_value, 0)){
+        INT: rem = MOD(int_value, to)
+        STR: remstr = rev[rem]
+        int_result = JOIN(remstr, int_result)
+        DIV(@int_value, to)
+        DEL(remstr)
+    }
+    IF(EQ(int_result, "")){
+        int_result = "0"
+    }
+    IF(EQ(neg, 1)){
+        int_result = JOIN("-", int_result)
+    }
+
+    # If there's no fractional part, return the integer conversion now.
+    IF(EQ(fracpart, "")){
+        DEL(num)
+        DEL(intpart)
+        DEL(fracpart)
+        POP(int_result)
+    }
+
+    # Convert fractional part: treat fracpart as an integer numerator over
+    # denom = from^len(fracpart). Produce digits by repeated multiply-by-`to`.
+    INT: frac_num = VALUE(fracpart, from)
+    INT: denom = POW(from, SLEN(fracpart))
+    STR: frac_res = ""
+    INT: iter = 0
+    # Limit iterations to avoid infinite repeats; 64 digits is arbitrary
+    WHILE(AND(GT(frac_num, 0), LT(iter, 1000000))){
+        ADD(@iter, 1)
+        MUL(@frac_num, to)
+        INT: d = DIV(frac_num, denom)
+        STR: dstr = rev[d]
+        frac_res = JOIN(frac_res, dstr)
+        INT: new_num = MOD(frac_num, denom)
+        frac_num = new_num
+        DEL(dstr)
+    }
+    IF(EQ(frac_res, "")){
+        frac_res = "0"
+    }
+
+    STR: result = JOIN(int_result, ".")
+    result = JOIN(result, frac_res)
+
+    DEL(num)
+    DEL(intpart)
+    DEL(fracpart)
+    DEL(frac_num)
+    DEL(denom)
+    DEL(frac_res)
+    DEL(iter)
+    POP(result)
+}
+
+INT: binary = 10
+INT: octal = 1000
+INT: decimal = 1010
+INT: hexadecimal = 10000
+INT: duotrigesimal = 100000
+INT: base32 = duotrigesimal
+INT: base64 = 1000000
