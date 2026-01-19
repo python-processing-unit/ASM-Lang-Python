@@ -136,7 +136,7 @@ FUNC BUILTIN_TESTS():INT{
     # --- Pointer literal @ and simple aliasing ---
     # Pointer literals exist as expressions; avoid declaring unknown PTR type.
     INT: base = 1010
-    STR: _ptr_sentinel = "@"  # placeholder to ensure @ token processed by lexer in other tests
+    STR: _ptr_sentinel = "@"  # placeholder to ensure @ token processed by lexer
     DEL(_ptr_sentinel)
     DEL(base)
 
@@ -569,7 +569,8 @@ FUNC BUILTIN_TESTS():INT{
     DEL(bbig)
     DEL(blit)
 
-    # Operators that are inherently interactive/terminating are referenced only in dead code.
+    # Operators that are inherently interactive/terminating are referenced only in dead
+    # code.
     IF(0){
         INPUT("Press Enter (manual test)")
         EXIT(0)

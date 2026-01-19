@@ -126,7 +126,7 @@ class HookRegistry:
         if len(self._repls) == 1:
             return self._repls[0]
         names = ", ".join(sorted({n for n, _, _ in self._repls}))
-        raise ASMExtensionError(f"Multiple REPL providers registered ({names}); select one explicitly is not implemented")
+        raise ASMExtensionError(f"Multiple REPL providers registered ({names}); explicit selection not implemented")
 
 
 @dataclass(frozen=True)
@@ -181,7 +181,7 @@ class ExtensionAPI:
                 qualified = f"{prefix}.{qualified}"
         self._services.operators.append((qualified, int(min_args), None if max_args is None else int(max_args), impl, doc))
 
-    def operator(self, name: str, min_args: int, max_args: Optional[int] = None, *, doc: str = ""):
+    def operator(self, name: str, min_args: int, max_args: Optional[int] = None, *, doc: str = "") -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.register_operator(name, min_args, max_args, fn, doc=doc)
             return fn
@@ -211,14 +211,14 @@ class ExtensionAPI:
             )
         )
 
-    def type(self, name: str, *, printable: bool = True):
+    def type(self, name: str, *, printable: bool = True) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
             raise ASMExtensionError("Use register_type(...) explicitly; decorator form not supported")
 
         return deco
 
     # ---- hooks ----
-    def on_event(self, event: str, handler: Optional[Callable[..., None]] = None, *, priority: int = 0):
+    def on_event(self, event: str, handler: Optional[Callable[..., None]] = None, *, priority: int = 0) -> Callable[..., None] | Callable[[Callable[..., None]], Callable[..., None]]:
         if handler is None:
             def deco(fn: Callable[..., None]) -> Callable[..., None]:
                 self._services.hook_registry.on_event(event, fn, priority=priority, ext_name=self._ext_name)
@@ -227,7 +227,7 @@ class ExtensionAPI:
         self._services.hook_registry.on_event(event, handler, priority=priority, ext_name=self._ext_name)
         return handler
 
-    def every_n_steps(self, every_n: int, handler: Optional[Callable[[Any, StepContext], None]] = None, *, name: str = ""):
+    def every_n_steps(self, every_n: int, handler: Optional[Callable[[Any, StepContext], None]] = None, *, name: str = "") -> Callable[[Any, StepContext], None] | Callable[[Callable[[Any, StepContext], None]], Callable[[Any, StepContext], None]]:
         if handler is None:
             def deco(fn: Callable[[Any, StepContext], None]) -> Callable[[Any, StepContext], None]:
                 self._services.hook_registry.add_step_rule(name=name or fn.__name__, every_n=every_n, handler=fn, ext_name=self._ext_name)

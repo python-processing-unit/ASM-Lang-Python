@@ -55,8 +55,11 @@ SYMBOLS = {
 }
 
 # Precompute identifier character sets for fast membership tests
-IDENT_START_CHARS = frozenset(list("abcdefghijklmnopqrstuvwxyz23456789/ABCDEFGHIFJKLMNOPQRSTUVWXYZ!$%&~_+|?"))
-IDENT_PART_CHARS = frozenset(list("abcdefghijklmnopqrstuvwxyz1234567890./ABCDEFGHIFJKLMNOPQRSTUVWXYZ!$%&~_+|?"))
+# Note: identifiers must not start with '0' or '1' (those begin numeric
+# literals), but may include digits 2-9 elsewhere. '.' is allowed to
+# separate module-qualified names.
+IDENT_START_CHARS = frozenset(list("abcdefghijklmnopqrstuvwxyz23456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ!$%&~_+|?"))
+IDENT_PART_CHARS = frozenset(list("abcdefghijklmnopqrstuvwxyz1234567890./ABCDEFGHIJKLMNOPQRSTUVWXYZ!$%&~_+|?"))
 
 
 class Lexer:
@@ -372,8 +375,8 @@ class Lexer:
         return ch in IDENT_START_CHARS
 
     def _is_identifier_part(self, ch: str) -> bool:
+        # '.' is allowed in identifiers to separate module-qualified names.
         return ch in IDENT_PART_CHARS
-        # "." is not actually a valid character in namespace symbols, but is allowed since it is used to separate module names from namespace symbols.
 
     def _consume_line_continuation(self) -> None:
         if self.index + 1 >= self._n:

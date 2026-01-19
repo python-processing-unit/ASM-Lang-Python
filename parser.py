@@ -561,8 +561,8 @@ class Parser:
             return Literal(location=self._location_from_token(number), value=value, literal_type="INT")
         if token.type == "FLOAT":
             flt: Token = self._consume("FLOAT")
-            value = self._parse_flt_literal(flt.value, token=flt)
-            return Literal(location=self._location_from_token(flt), value=value, literal_type="FLT")
+            flt_value = self._parse_flt_literal(flt.value, token=flt)
+            return Literal(location=self._location_from_token(flt), value=flt_value, literal_type="FLT")
         if token.type == "STRING":
             string_token = self._consume("STRING")
             return Literal(location=self._location_from_token(string_token), value=string_token.value, literal_type="STR")
@@ -581,7 +581,7 @@ class Parser:
         if token.type == "AT":
             at_tok = self._consume("AT")
             ident_tok = self._consume("IDENT")
-            location: SourceLocation = self._location_from_token(at_tok)
+            location = self._location_from_token(at_tok)
             return PointerExpression(location=location, target=ident_tok.value)
         if token.type == "LPAREN":
             self._consume("LPAREN")

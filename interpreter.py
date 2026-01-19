@@ -11,7 +11,7 @@ import numpy as np
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 from collections import OrderedDict
 from numpy.typing import NDArray
 
@@ -30,6 +30,7 @@ from parser import (
     ParForStatement,
     FuncDef,
     LambdaExpression,
+    AsyncExpression,
     AsyncStatement,
     GotoStatement,
     GotopointStatement,
@@ -47,6 +48,7 @@ from parser import (
     Program,
     ReturnStatement,
     PopStatement,
+    ThrStatement,
     SourceLocation,
     Statement,
     TensorLiteral,
@@ -409,7 +411,7 @@ class StateLogger:
         location: Optional[SourceLocation],
         statement: Optional[str],
         rewrite_record: Optional[Dict[str, Any]] = None,
-        env_snapshot: Optional[Dict[str, int]] = None,
+        env_snapshot: Optional[Dict[str, Any]] = None,
     ) -> StateEntry:
         # Hot-path: reuse the caller-provided dict rather than copying.
         # The interpreter constructs a fresh dict per step in _log_step, so
@@ -584,26 +586,26 @@ class Builtins:
 
     def _register_int_only(self, name: str, arity: int, func: Callable[..., int]) -> None:
         if arity == 1:
-            def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+            def impl_1(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
                 a = self._expect_int(args[0], name, location)
                 return Value(TYPE_INT, func(a))
 
-            self.table[name] = BuiltinFunction(name=name, min_args=1, max_args=1, impl=impl)
+            self.table[name] = BuiltinFunction(name=name, min_args=1, max_args=1, impl=impl_1)
             return
         if arity == 2:
-            def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+            def impl_2(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
                 a = self._expect_int(args[0], name, location)
                 b = self._expect_int(args[1], name, location)
                 return Value(TYPE_INT, func(a, b))
 
-            self.table[name] = BuiltinFunction(name=name, min_args=2, max_args=2, impl=impl)
+            self.table[name] = BuiltinFunction(name=name, min_args=2, max_args=2, impl=impl_2)
             return
 
-        def impl(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
+        def impl_n(_: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
             ints = [self._expect_int(arg, name, location) for arg in args]
             return Value(TYPE_INT, func(*ints))
 
-        self.table[name] = BuiltinFunction(name=name, min_args=arity, max_args=arity, impl=impl)
+        self.table[name] = BuiltinFunction(name=name, min_args=arity, max_args=arity, impl=impl_n)
 
     def _register_variadic(
         self,
@@ -818,19 +820,19 @@ class Builtins:
         return Value(TYPE_FLT, float(math.lcm(int(a), int(b))))
 
     def _gt(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
-        _, a, b = self._expect_num_pair(args, "GT", location)
+        t, a, b = self._expect_num_pair(args, "GT", location)
         return Value(TYPE_INT, 1 if a > b else 0)
 
     def _lt(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
-        _, a, b = self._expect_num_pair(args, "LT", location)
+        t, a, b = self._expect_num_pair(args, "LT", location)
         return Value(TYPE_INT, 1 if a < b else 0)
 
     def _gte(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
-        _, a, b = self._expect_num_pair(args, "GTE", location)
+        t, a, b = self._expect_num_pair(args, "GTE", location)
         return Value(TYPE_INT, 1 if a >= b else 0)
 
     def _lte(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
-        _, a, b = self._expect_num_pair(args, "LTE", location)
+        t, a, b = self._expect_num_pair(args, "LTE", location)
         return Value(TYPE_INT, 1 if a <= b else 0)
 
     def _log(self, _: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
@@ -1696,9 +1698,8 @@ class Builtins:
                 # Also register alias-qualified function names when an alias was requested
                 if export_prefix != module_name:
                     # fn.name is module_name.func; produce alias.func
-                    parts = fn.name.split(".", 1)
-                    if len(parts) == 2:
-                        _, unqualified = parts
+                    if "." in fn.name:
+                        unqualified = fn.name.split(".", 1)[1]
                         alias_name = f"{export_prefix}.{unqualified}"
                         if alias_name not in interpreter.functions:
                             created = Function(
@@ -1862,9 +1863,8 @@ class Builtins:
         # same function bodies so callers can invoke e.g. ALIAS.F().
         if export_prefix != module_name:
             for fn in registered_functions:
-                parts = fn.name.split(".", 1)
-                if len(parts) == 2:
-                    _, unqualified = parts
+                if "." in fn.name:
+                    unqualified = fn.name.split(".", 1)[1]
                     alias_name = f"{export_prefix}.{unqualified}"
                     if alias_name not in interpreter.functions:
                         alias_fn = Function(
@@ -2038,9 +2038,8 @@ class Builtins:
                 registered_functions.append(created)
 
         for fn in registered_functions:
-            parts = fn.name.split(".", 1)
-            if len(parts) == 2:
-                _, unqualified = parts
+            if "." in fn.name:
+                unqualified = fn.name.split(".", 1)[1]
                 alias_name = f"{module_name}.{unqualified}"
                 if alias_name not in interpreter.functions:
                     alias_fn = Function(
@@ -2513,9 +2512,9 @@ class Builtins:
                             rendered = repr(d.value)
                     else:
                         # best-effort: use source snippet if available
-                        loc = getattr(d, "location", None)
-                        if loc is not None and getattr(loc, "statement", ""):
-                            stmt = loc.statement
+                        loc = getattr(d, "location", None)  # type: ignore[arg-type]
+                        stmt = getattr(loc, "statement", None) if loc is not None else None
+                        if stmt:
                             col = max(1, getattr(loc, "column", 1))
                             # columns are 1-based; slice defensively
                             try:
@@ -2609,7 +2608,7 @@ class Builtins:
         if len(args) != 1:
             raise ASMRuntimeError("SER expects one argument", location=location, rewrite_rule="SER")
 
-        def ser_val(v: Value):
+        def ser_val(v: Value) -> Any:
             t = v.type
             if t == TYPE_INT:
                 assert isinstance(v.value, int)
@@ -2728,7 +2727,7 @@ class Builtins:
                         if isinstance(raw, str) and raw.startswith("-"):
                             neg = True
                             raw = raw[1:]
-                        kval = int(raw, 2) if raw != "" else 0
+                        kval: Any = int(raw, 2) if raw != "" else 0
                         if neg:
                             kval = -kval
                     elif kt == "FLT":
@@ -3066,13 +3065,13 @@ class Builtins:
         if first_type == TYPE_INT:
             sc = int(scalar.value)
             for i in range(n):
-                entry = int(flat[i].value)
-                out[i] = Value(TYPE_INT, op_int(entry, sc))
+                entry_int = int(flat[i].value)
+                out[i] = Value(TYPE_INT, op_int(entry_int, sc))
             return Tensor(shape=list(tensor.shape), data=out)
         scf = float(scalar.value)
         for i in range(n):
-            entry = float(flat[i].value)
-            out[i] = Value(TYPE_FLT, op_flt(entry, scf))
+            entry_flt = float(flat[i].value)
+            out[i] = Value(TYPE_FLT, op_flt(entry_flt, scf))
         return Tensor(shape=list(tensor.shape), data=out)
 
     def _ensure_tensor_ints(self, tensor: Tensor, rule: str, location: SourceLocation) -> None:
@@ -3360,7 +3359,7 @@ class Builtins:
         interpreter: "Interpreter",
         args: List[Value],
         __: List[Expression],
-        ___: Environment,
+        env: Environment,
         location: SourceLocation,
     ) -> Value:
         """TINT(TNS: obj):TNS
@@ -3376,7 +3375,7 @@ class Builtins:
         for i in range(n):
             entry = flat[i]
             try:
-                converted = self._int_op(None, [entry], [], None, location)
+                converted = self._int_op(interpreter, [entry], [], env, location)
             except ASMRuntimeError as e:
                 raise ASMRuntimeError(f"TINT: cannot convert tensor element: {e.message}", location=location, rewrite_rule="TINT")
             out[i] = converted
@@ -3387,7 +3386,7 @@ class Builtins:
         interpreter: "Interpreter",
         args: List[Value],
         __: List[Expression],
-        ___: Environment,
+        env: Environment,
         location: SourceLocation,
     ) -> Value:
         """TFLT(TNS: obj):TNS
@@ -3403,7 +3402,7 @@ class Builtins:
         for i in range(n):
             entry = flat[i]
             try:
-                converted = self._flt_op(None, [entry], [], None, location)
+                converted = self._flt_op(interpreter, [entry], [], env, location)
             except ASMRuntimeError as e:
                 raise ASMRuntimeError(f"TFLT: cannot convert tensor element: {e.message}", location=location, rewrite_rule="TFLT")
             out[i] = converted
@@ -3414,7 +3413,7 @@ class Builtins:
         interpreter: "Interpreter",
         args: List[Value],
         __: List[Expression],
-        ___: Environment,
+        env: Environment,
         location: SourceLocation,
     ) -> Value:
         """TSTR(TNS: obj):TNS
@@ -3430,7 +3429,7 @@ class Builtins:
         for i in range(n):
             entry = flat[i]
             try:
-                converted = self._str_op(None, [entry], [], None, location)
+                converted = self._str_op(interpreter, [entry], [], env, location)
             except ASMRuntimeError as e:
                 raise ASMRuntimeError(f"TSTR: cannot convert tensor element: {e.message}", location=location, rewrite_rule="TSTR")
             out[i] = converted
@@ -3645,7 +3644,7 @@ class Builtins:
                             padded[px, py, pc] = pad_zero
 
             # Prepare kernel and bias arrays
-            k_arr = kernel.data.reshape(tuple(kernel.shape))
+            k_arr = cast(NDArray[Any], kernel.data.reshape(tuple(kernel.shape)))
             bias_tns: Optional[Tensor] = None
             use_bias = False
             if bias_val is not None:
@@ -3655,9 +3654,14 @@ class Builtins:
 
             out_buf = np.empty(out_w * out_h * out_c, dtype=object)
             idx_out = 0
+            
+            if bias_val is not None:
+                bias_tns = self._expect_tns(bias_val, "CONV", location)
+                
             for oc in range(out_c):
-                b = 0
+                b: Union[int, float] = 0
                 if use_bias:
+                    assert bias_tns is not None
                     bv = bias_tns.data.flat[oc]
                     b = int(bv.value) if out_type == TYPE_INT else float(bv.value)
                 for oy in range(out_h):
@@ -3671,8 +3675,8 @@ class Builtins:
                                 for kx in range(kw):
                                     px = base_x + kx
                                     py = base_y + ky
-                                    xv: Value = padded[px, py, ic]
-                                    kv: Value = k_arr[kx, ky, ic, oc]
+                                    xv = padded[px, py, ic]
+                                    kv = k_arr[kx, ky, ic, oc]
                                     if out_type == TYPE_INT:
                                         acc_int += int(xv.value) * int(kv.value)
                                     else:
@@ -3680,11 +3684,11 @@ class Builtins:
                                         ak = float(kv.value) if kv.type == TYPE_FLT else float(int(kv.value))
                                         acc_flt += ax * ak
                         if out_type == TYPE_INT:
-                            val = acc_int + (int(b) if use_bias else 0)
-                            out_buf[idx_out] = Value(TYPE_INT, val)
+                            val_int = acc_int + (int(b) if use_bias else 0)
+                            out_buf[idx_out] = Value(TYPE_INT, val_int)
                         else:
-                            val = acc_flt + (float(b) if use_bias else 0.0)
-                            out_buf[idx_out] = Value(TYPE_FLT, float(val))
+                            val_flt = acc_flt + (float(b) if use_bias else 0.0)
+                            out_buf[idx_out] = Value(TYPE_FLT, float(val_flt))
                         idx_out += 1
 
             return Value(TYPE_TNS, Tensor(shape=[out_w, out_h, out_c], data=out_buf))
@@ -3705,7 +3709,7 @@ class Builtins:
                 rewrite_rule="CONV",
             )
 
-        def _uniform_numeric_type(t: Tensor, which: str) -> str:
+        def _check_uniform_type(t: Tensor, which: str) -> str:
             if t.data.size == 0:
                 raise ASMRuntimeError(
                     f"CONV does not support empty {which} tensors",
@@ -3727,8 +3731,8 @@ class Builtins:
                 )
             return first
 
-        x_type = _uniform_numeric_type(x, "input")
-        k_type = _uniform_numeric_type(kernel, "kernel")
+        x_type = _check_uniform_type(x, "input")
+        k_type = _check_uniform_type(kernel, "kernel")
         out_type = TYPE_INT if (x_type == TYPE_INT and k_type == TYPE_INT) else TYPE_FLT
 
         rank = len(x.shape)
@@ -3738,13 +3742,13 @@ class Builtins:
             sliding_window_view = np.lib.stride_tricks.sliding_window_view  # type: ignore[attr-defined]
 
             if out_type == TYPE_INT:
-                x_int = np.fromiter((int(v.value) for v in x.data.flat), dtype=object, count=x.data.size).reshape(tuple(x.shape))
-                k_int = np.fromiter((int(v.value) for v in kernel.data.flat), dtype=object, count=kernel.data.size).reshape(tuple(kernel.shape))
-                k_flip = np.flip(k_int, axis=tuple(range(rank)))
+                x_int = cast(Any, np.fromiter((int(v.value) for v in x.data.flat), dtype=object, count=x.data.size).reshape(tuple(x.shape)))
+                k_int = cast(Any, np.fromiter((int(v.value) for v in kernel.data.flat), dtype=object, count=kernel.data.size).reshape(tuple(kernel.shape)))
+                k_flip_arr = cast(Any, np.flip(k_int, axis=tuple(range(rank))))
                 pad_width = [(c, c) for c in centers]
-                padded = np.pad(x_int, pad_width=pad_width, mode="edge")
-                windows = sliding_window_view(padded, tuple(kernel.shape))
-                acc = (windows * k_flip).sum(axis=tuple(range(-rank, 0)))
+                padded_np = np.pad(x_int, pad_width=pad_width, mode="edge")
+                windows = sliding_window_view(padded_np, tuple(kernel.shape))
+                acc = (windows * k_flip_arr).sum(axis=tuple(range(-rank, 0)))
                 out = np.empty(x.data.size, dtype=object)
                 i = 0
                 for val in acc.flat:
@@ -3755,13 +3759,13 @@ class Builtins:
             def _as_float(v: Value) -> float:
                 return float(v.value) if v.type == TYPE_FLT else float(int(v.value))
 
-            x_flt = np.fromiter((_as_float(v) for v in x.data.flat), dtype=float, count=x.data.size).reshape(tuple(x.shape))
-            k_flt = np.fromiter((_as_float(v) for v in kernel.data.flat), dtype=float, count=kernel.data.size).reshape(tuple(kernel.shape))
-            k_flip = np.flip(k_flt, axis=tuple(range(rank)))
+            x_flt = cast(Any, np.fromiter((_as_float(v) for v in x.data.flat), dtype=float, count=x.data.size).reshape(tuple(x.shape)))
+            k_flt = cast(Any, np.fromiter((_as_float(v) for v in kernel.data.flat), dtype=float, count=kernel.data.size).reshape(tuple(kernel.shape)))
+            k_flip_arr = cast(Any, np.flip(k_flt, axis=tuple(range(rank))))
             pad_width = [(c, c) for c in centers]
-            padded = np.pad(x_flt, pad_width=pad_width, mode="edge")
-            windows = sliding_window_view(padded, tuple(kernel.shape))
-            acc = (windows * k_flip).sum(axis=tuple(range(-rank, 0)))
+            padded_np = np.pad(x_flt, pad_width=pad_width, mode="edge")
+            windows = sliding_window_view(padded_np, tuple(kernel.shape))
+            acc = (windows * k_flip_arr).sum(axis=tuple(range(-rank, 0)))
             out = np.empty(x.data.size, dtype=object)
             i = 0
             for val in acc.flat:
@@ -3771,7 +3775,7 @@ class Builtins:
 
         except Exception:
             x_arr = x.data.reshape(tuple(x.shape))
-            k_arr = kernel.data.reshape(tuple(kernel.shape))
+            k_arr = cast(NDArray[Any], kernel.data.reshape(tuple(kernel.shape)))
             out = np.empty(x.data.size, dtype=object)
             out_i = 0
             for out_pos in np.ndindex(*x.shape):
@@ -3788,9 +3792,9 @@ class Builtins:
                             coord = x.shape[axis] - 1
                         in_pos.append(coord)
 
-                    k_flip = tuple(kernel.shape[axis] - 1 - k_pos[axis] for axis in range(rank))
-                    xv: Value = x_arr[tuple(in_pos)]
-                    kv: Value = k_arr[k_flip]
+                        k_flip_idx = tuple(kernel.shape[axis] - 1 - k_pos[axis] for axis in range(rank))
+                        xv = x_arr[tuple(in_pos)]
+                        kv = k_arr[k_flip_idx]
 
                     if out_type == TYPE_INT:
                         acc_int += int(xv.value) * int(kv.value)
@@ -3860,7 +3864,7 @@ class Builtins:
                     command_to_run = ["cmd", "/c", script_path]
                     run_kwargs["shell"] = False
 
-            completed = subprocess.run(command_to_run, **run_kwargs)
+            completed = subprocess.run(command_to_run, **run_kwargs)  # type: ignore[call-overload]
             code = completed.returncode
             out = completed.stdout or ""
             err = completed.stderr or ""
@@ -3931,7 +3935,7 @@ class Builtins:
         raise ExitSignal(code)
 
     # --- thread builtins ---
-    def _resolve_thr_from_value(self, interpreter: "Interpreter", val: Value, rule: str, location: SourceLocation):
+    def _resolve_thr_from_value(self, interpreter: "Interpreter", val: Value, rule: str, location: SourceLocation) -> Dict[str, Any]:
         val = interpreter._deref_value(val, location=location, rule=rule)
         if val.type != TYPE_THR:
             raise ASMRuntimeError(f"{rule} expects THR value", location=location, rewrite_rule=rule)
@@ -3975,7 +3979,7 @@ class Builtins:
         ctrl["pause_event"].clear()
         ctrl["state"] = "paused"
         if seconds is not None and seconds >= 0:
-            def _delayed_resume():
+            def _delayed_resume() -> None:
                 time.sleep(seconds)
                 ctrl["paused"] = False
                 ctrl["pause_event"].set()
@@ -4014,7 +4018,7 @@ class Builtins:
         ctrl["finished"] = False
         ctrl["state"] = "running"
 
-        def _worker_restart():
+        def _worker_restart() -> None:
             frame = interpreter._new_frame("<thr>", env, location)
             interpreter._thread_ctrls[threading.get_ident()] = ctrl
             interpreter.call_stack.append(frame)
@@ -4421,7 +4425,7 @@ class Interpreter:
         execute_stmt = self._execute_statement
 
         frame: Frame = self.call_stack[-1]
-        gotopoints: Dict[int, int] = frame.gotopoints
+        gotopoints: Dict[Any, int] = frame.gotopoints
         while i < n_statements:
             statement = statements[i]
             emit_event("before_statement", self, statement, env)
@@ -4531,8 +4535,8 @@ class Interpreter:
                 cur = cur.parent
             return False
 
-        statement_type = type(statement)
-        if statement_type is Declaration:
+        # statement_type = type(statement)
+        if isinstance(statement, Declaration):
             if "." in statement.name and not _name_exists_or_declared(statement.name):
                 raise ASMRuntimeError(
                     f"Cannot create module-qualified name '{statement.name}'",
@@ -4560,7 +4564,7 @@ class Interpreter:
                     )
             env.declared[statement.name] = statement.declared_type
             return
-        if statement_type is Assignment:
+        if isinstance(statement, Assignment):
             if (
                 statement.declared_type is not None
                 and "." in statement.target
@@ -4578,7 +4582,7 @@ class Interpreter:
             value = self._evaluate_expression(statement.expression, env)
             env.set(statement.target, value, declared_type=statement.declared_type)
             return
-        if statement_type is TensorSetStatement:
+        if isinstance(statement, TensorSetStatement):
             base_expr, index_nodes, index_flags = self._gather_index_chain(statement.target)
             if type(base_expr) is not Identifier:
                 raise ASMRuntimeError(
@@ -4704,14 +4708,13 @@ class Interpreter:
                 arr = current_val.value.data.reshape(tuple(current_val.value.shape))
                 indexers: List[object] = []
                 for dim, node in enumerate(last_indices):
-                    node_type = type(node)
-                    if node_type is Range:
+                    if isinstance(node, Range):
                         lo_val = expect_int(eval_expr(node.lo, env), "ASSIGN", statement.location)
                         hi_val = expect_int(eval_expr(node.hi, env), "ASSIGN", statement.location)
                         lo_res = self._resolve_tensor_index(lo_val, current_val.value.shape[dim], "ASSIGN", statement.location)
                         hi_res = self._resolve_tensor_index(hi_val, current_val.value.shape[dim], "ASSIGN", statement.location)
                         indexers.append(slice(lo_res - 1, hi_res))
-                    elif node_type is Star:
+                    elif isinstance(node, Star):
                         indexers.append(slice(None, None))
                     else:
                         raw = expect_int(eval_expr(node, env), "ASSIGN", statement.location)
@@ -4725,27 +4728,27 @@ class Interpreter:
                 # Perform the slice assignment
                 rhs_arr = new_value.value.data.reshape(tuple(new_value.value.shape))
                 try:
-                    arr[tuple(indexers)] = rhs_arr
+                    arr[cast(Any, tuple(indexers))] = rhs_arr
                 except (ValueError, IndexError, RuntimeError) as exc:
                     raise ASMRuntimeError(f"Slice assignment failed: {exc}", location=statement.location, rewrite_rule="ASSIGN")
                 # The assignment mutated the view; no need to reassign
                 return
-        if statement_type is ExpressionStatement:
+        if isinstance(statement, ExpressionStatement):
             self._evaluate_expression(statement.expression, env)
             return
-        if statement_type is IfStatement:
+        if isinstance(statement, IfStatement):
             self._execute_if(statement, env)
             return
-        if statement_type is WhileStatement:
+        if isinstance(statement, WhileStatement):
             self._execute_while(statement, env)
             return
-        if statement_type is ForStatement:
+        if isinstance(statement, ForStatement):
             self._execute_for(statement, env)
             return
-        if statement_type is ParForStatement:
+        if isinstance(statement, ParForStatement):
             self._execute_parfor(statement, env)
             return
-        if statement_type is FuncDef:
+        if isinstance(statement, FuncDef):
             if statement.name in self.builtins.table:
                 raise ASMRuntimeError(
                     f"Function name '{statement.name}' conflicts with built-in", location=statement.location
@@ -4760,13 +4763,13 @@ class Interpreter:
                 closure=env,
             )
             return
-        if statement_type is PopStatement:
-            frame: Frame = self.call_stack[-1]
+        if isinstance(statement, PopStatement):
+            frame = self.call_stack[-1]
             if frame.name == "<top-level>":
                 raise ASMRuntimeError("POP outside of function", location=statement.location, rewrite_rule="POP")
             # Expect identifier expression to delete a symbol
             expr = statement.expression
-            if type(expr) is not Identifier:
+            if not isinstance(expr, Identifier):
                 raise ASMRuntimeError("POP expects identifier", location=statement.location, rewrite_rule="POP")
             name = expr.name
             try:
@@ -4780,8 +4783,8 @@ class Interpreter:
                 err.location = statement.location
                 raise
             raise ReturnSignal(value)
-        if statement_type is ReturnStatement:
-            frame: Frame = self.call_stack[-1]
+        if isinstance(statement, ReturnStatement):
+            frame = self.call_stack[-1]
             if frame.name == "<top-level>":
                 raise ASMRuntimeError("RETURN outside of function", location=statement.location, rewrite_rule="RETURN")
             if statement.expression:
@@ -4818,26 +4821,26 @@ class Interpreter:
                             rewrite_rule="RETURN",
                         )
             raise ReturnSignal(value)
-        if statement_type is BreakStatement:
+        if isinstance(statement, BreakStatement):
             count_val = self._evaluate_expression(statement.expression, env)
             count = self._expect_int(count_val, "BREAK", statement.location)
             if count <= 0:
                 raise ASMRuntimeError("BREAK count must be > 0", location=statement.location, rewrite_rule="BREAK")
             raise BreakSignal(count)
-        if statement_type is ContinueStatement:
+        if isinstance(statement, ContinueStatement):
             # Signal to the innermost loop to skip to next iteration.
             raise ContinueSignal()
-        if statement_type is GotoStatement:
+        if isinstance(statement, GotoStatement):
             target = self._evaluate_expression(statement.expression, env)
             raise JumpSignal(target)
-        if statement_type.__name__ == "ThrStatement":
+        if isinstance(statement, ThrStatement):
             # Create a named THR controller and start execution in background
             # Bind the symbol in current env to the THR value.
-            symbol = statement.symbol  # type: ignore[attr-defined]
-            block = statement.block  # type: ignore[attr-defined]
+            symbol = statement.symbol
+            block = statement.block
             loc = statement.location
 
-            ctrl = {
+            ctrl_thr: Dict[str, Any] = {
                 "thread": None,
                 "paused": False,
                 "pause_event": threading.Event(),
@@ -4848,12 +4851,12 @@ class Interpreter:
                 "block": block,
             }
             # controller starts unpaused
-            ctrl["pause_event"].set()
+            ctrl_thr["pause_event"].set()
 
-            def _thr_worker():
+            def _thr_worker() -> None:
                 frame = self._new_frame(f"<thr:{symbol}>", env, loc)
                 # register ctrl for this OS thread
-                self._thread_ctrls[threading.get_ident()] = ctrl
+                self._thread_ctrls[threading.get_ident()] = ctrl_thr
                 self.call_stack.append(frame)
                 try:
                     self._emit_event("thr_start", self, frame, env, symbol)
@@ -4869,8 +4872,8 @@ class Interpreter:
                         self.call_stack.pop()
                     except Exception:
                         pass
-                    ctrl["finished"] = True
-                    ctrl["state"] = "finished" if not ctrl.get("stop") else "stopped"
+                    ctrl_thr["finished"] = True
+                    ctrl_thr["state"] = "finished" if not ctrl_thr.get("stop") else "stopped"
                     try:
                         self._emit_event("thr_end", self, frame, env, symbol)
                     except Exception:
@@ -4884,16 +4887,16 @@ class Interpreter:
                         pass
 
             t = threading.Thread(target=_thr_worker, daemon=True, name=f"asm_thr_{symbol}_{self.frame_counter}")
-            ctrl["thread"] = t
+            ctrl_thr["thread"] = t
             with self._thr_lock:
                 if symbol in self._thrs:
                     raise ASMRuntimeError(f"THR symbol '{symbol}' already exists", location=statement.location, rewrite_rule="THR")
-                self._thrs[symbol] = ctrl
+                self._thrs[symbol] = ctrl_thr
             # Bind symbol to THR value in environment
-            env.set(symbol, Value(TYPE_THR, ctrl), declared_type="THR")
+            env.set(symbol, Value(TYPE_THR, ctrl_thr), declared_type="THR")
             t.start()
             return
-        if statement_type is AsyncStatement:
+        if isinstance(statement, AsyncStatement):
             # Execute the block synchronously inside a background thread
             block = statement.block
             loc = statement.location
@@ -4925,7 +4928,7 @@ class Interpreter:
             # For compatibility, ASYNC as a statement fires and returns a THR-like
             # controller which is ignored by statement context. Create a controller
             # and start a thread.
-            ctrl = {
+            ctrl_async: Dict[str, Any] = {
                 "thread": None,
                 "paused": False,
                 "pause_event": threading.Event(),
@@ -4937,12 +4940,12 @@ class Interpreter:
             }
 
             # controller starts unpaused
-            ctrl["pause_event"].set()
+            ctrl_async["pause_event"].set()
 
-            def _async_worker_with_ctrl():
+            def _async_worker_with_ctrl() -> None:
                 frame = self._new_frame("<async>", env, loc)
                 # register ctrl for this OS thread
-                self._thread_ctrls[threading.get_ident()] = ctrl
+                self._thread_ctrls[threading.get_ident()] = ctrl_async
                 self.call_stack.append(frame)
                 try:
                     self._emit_event("async_start", self, frame, env)
@@ -4962,8 +4965,8 @@ class Interpreter:
                         self._emit_event("async_end", self, frame, env)
                     except Exception:
                         pass
-                    ctrl["finished"] = True
-                    ctrl["state"] = "finished" if not ctrl.get("stop") else "stopped"
+                    ctrl_async["finished"] = True
+                    ctrl_async["state"] = "finished" if not ctrl_async.get("stop") else "stopped"
                     # unregister ctrl
                     try:
                         tid = threading.get_ident()
@@ -4973,7 +4976,7 @@ class Interpreter:
                         pass
 
             t = threading.Thread(target=_async_worker_with_ctrl, daemon=True, name=f"asm_async_{self.frame_counter}")
-            ctrl["thread"] = t
+            ctrl_async["thread"] = t
             t.start()
             return
         raise ASMRuntimeError("Unsupported statement", location=statement.location)
@@ -5198,12 +5201,6 @@ class Interpreter:
         ctx = TypeContext(interpreter=self, location=location)
         return int(spec.condition_int(ctx, value))
 
-    def _expect_int(self, value: Value, rule: str, location: Optional[SourceLocation]) -> int:
-        value = self._deref_value(value, location=location, rule=rule)
-        if value.type != TYPE_INT:
-            raise ASMRuntimeError(f"{rule} expects integer value", location=location, rewrite_rule=rule)
-        return value.value  # type: ignore[return-value]
-
     def _tensor_total_size(self, shape: List[int]) -> int:
         size = 1
         for dim in shape:
@@ -5390,24 +5387,23 @@ class Interpreter:
         arr = base_val.value.data.reshape(tuple(base_val.value.shape))
         indexers: List[object] = []
         for dim, node in enumerate(index_nodes):
-            node_type = type(node)
-            if node_type is Range:
-                lo_val = expect_int(eval_expr(node.lo, env), "INDEX", location)
-                hi_val = expect_int(eval_expr(node.hi, env), "INDEX", location)
-                # validate both endpoints
-                lo_res = self._resolve_tensor_index(lo_val, base_val.value.shape[dim], "INDEX", location)
-                hi_res = self._resolve_tensor_index(hi_val, base_val.value.shape[dim], "INDEX", location)
-                # convert to 0-based slice: start = lo_res-1, stop = hi_res (exclusive)
-                indexers.append(slice(lo_res - 1, hi_res))
-            elif node_type is Star:
-                # Full-dimension slice `*` selects the entire axis
-                indexers.append(slice(None, None))
-            else:
-                raw = expect_int(eval_expr(node, env), "INDEX", location)
-                idx_res = self._resolve_tensor_index(raw, base_val.value.shape[dim], "INDEX", location)
-                indexers.append(idx_res - 1)
+                if isinstance(node, Range):
+                    lo_val = expect_int(eval_expr(node.lo, env), "INDEX", location)
+                    hi_val = expect_int(eval_expr(node.hi, env), "INDEX", location)
+                    # validate both endpoints
+                    lo_res = self._resolve_tensor_index(lo_val, base_val.value.shape[dim], "INDEX", location)
+                    hi_res = self._resolve_tensor_index(hi_val, base_val.value.shape[dim], "INDEX", location)
+                    # convert to 0-based slice: start = lo_res-1, stop = hi_res (exclusive)
+                    indexers.append(slice(lo_res - 1, hi_res))
+                elif isinstance(node, Star):
+                    # Full-dimension slice `*` selects the entire axis
+                    indexers.append(slice(None, None))
+                else:
+                    raw = expect_int(eval_expr(node, env), "INDEX", location)
+                    idx_res = self._resolve_tensor_index(raw, base_val.value.shape[dim], "INDEX", location)
+                    indexers.append(idx_res - 1)
 
-        sel = arr[tuple(indexers)]
+        sel = arr[cast(Any, tuple(indexers))]
         sel_arr = sel if isinstance(sel, np.ndarray) else np.array(sel, dtype=object)
         # Ensure sel_arr is at least 1-D (slices guarantee at least one dim)
         if sel_arr.ndim == 0:
@@ -5439,13 +5435,12 @@ class Interpreter:
         return current
 
     def _evaluate_expression(self, expression: Expression, env: Environment) -> Value:
-        expression_type = type(expression)
-        if expression_type is Literal:
+        if isinstance(expression, Literal):
             return Value(expression.literal_type, expression.value)
-        if expression_type is TensorLiteral:
+        if isinstance(expression, TensorLiteral):
             tensor = self._build_tensor_from_literal(expression, env)
             return Value(TYPE_TNS, tensor)
-        if expression_type is MapLiteral:
+        if isinstance(expression, MapLiteral):
             m = Map()
             eval_expr = self._evaluate_expression
             for key_node, val_node in expression.items:
@@ -5457,9 +5452,9 @@ class Interpreter:
                 val = eval_expr(val_node, env)
                 m.data[key] = val
             return Value(TYPE_MAP, m)
-        if expression_type is PointerExpression:
+        if isinstance(expression, PointerExpression):
             return self._make_pointer_value(expression.target, env, expression.location)
-        if expression_type is IndexExpression:
+        if isinstance(expression, IndexExpression):
             base_expr, index_nodes, index_flags = self._gather_index_chain(expression)
             base_val = self._evaluate_expression(base_expr, env)
             base_val = self._deref_value(base_val, location=expression.location, rule="INDEX")
@@ -5494,85 +5489,8 @@ class Interpreter:
             
             return current_val
             
-        # Legacy code paths kept for reference but should not be reached
-        if False and expression_type is IndexExpression:
-            base_expr, index_nodes, index_flags = self._gather_index_chain(expression)
-            base_val = self._evaluate_expression(base_expr, env)
-            base_val = self._deref_value(base_val, location=expression.location, rule="INDEX")
-            # Tensor indexing path (existing semantics)
-            if base_val.type == TYPE_TNS:
-                assert isinstance(base_val.value, Tensor)
-                eval_expr = self._evaluate_expression
-                expect_int = self._expect_int
-                # Determine if any index is a range (slice) or star. If none,
-                # behave as before and return a single element. If any ranges
-                # or stars present, construct numpy slicing indices and return
-                # a Tensor.
-                RangeT = Range
-                StarT = Star
-                has_range = any((type(n) is RangeT) or (type(n) is StarT) for n in index_nodes)
-                if not has_range:
-                    indices: List[int] = []
-                    indices_append = indices.append
-                    for idx_node in index_nodes:
-                        indices_append(expect_int(eval_expr(idx_node, env), "INDEX", expression.location))
-                    offset = self._tensor_flat_index(base_val.value, indices, "INDEX", expression.location)
-                    return base_val.value.data[offset]
 
-                # Build numpy indexers (mix of ints and slices). Resolve 1-based
-                # indices into 0-based python indices; ranges are inclusive.
-                arr = base_val.value.data.reshape(tuple(base_val.value.shape))
-                indexers: List[object] = []
-                for dim, node in enumerate(index_nodes):
-                    node_type = type(node)
-                    if node_type is Range:
-                        lo_val = expect_int(eval_expr(node.lo, env), "INDEX", expression.location)
-                        hi_val = expect_int(eval_expr(node.hi, env), "INDEX", expression.location)
-                        # validate both endpoints
-                        lo_res = self._resolve_tensor_index(lo_val, base_val.value.shape[dim], "INDEX", expression.location)
-                        hi_res = self._resolve_tensor_index(hi_val, base_val.value.shape[dim], "INDEX", expression.location)
-                        # convert to 0-based slice: start = lo_res-1, stop = hi_res (exclusive)
-                        indexers.append(slice(lo_res - 1, hi_res))
-                    elif node_type is Star:
-                        # Full-dimension slice `*` selects the entire axis
-                        indexers.append(slice(None, None))
-                    else:
-                        raw = expect_int(eval_expr(node, env), "INDEX", expression.location)
-                        idx_res = self._resolve_tensor_index(raw, base_val.value.shape[dim], "INDEX", expression.location)
-                        indexers.append(idx_res - 1)
-
-                sel = arr[tuple(indexers)]
-                sel_arr = sel if isinstance(sel, np.ndarray) else np.array(sel, dtype=object)
-                # Ensure sel_arr is at least 1-D (slices guarantee at least one dim)
-                if sel_arr.ndim == 0:
-                    # Single element selected despite slice usage; wrap as 1-element tensor
-                    sel_arr = sel_arr.reshape((1,))
-                out_shape = list(sel_arr.shape)
-                out_data = sel_arr.ravel()
-                return Value(TYPE_TNS, Tensor(shape=out_shape, data=out_data))
-
-            # Map indexing path: support multi-key lookup like m<k1,k2>
-            if base_val.type == TYPE_MAP:
-                assert isinstance(base_val.value, Map)
-                eval_expr = self._evaluate_expression
-                current = base_val
-                for idx, node in enumerate(index_nodes):
-                    key_val = eval_expr(node, env)
-                    key_val = self._deref_value(key_val, location=expression.location, rule="INDEX")
-                    if key_val.type not in (TYPE_INT, TYPE_FLT, TYPE_STR):
-                        raise ASMRuntimeError("Map keys must be INT, FLT, or STR", location=expression.location, rewrite_rule="INDEX")
-                    key = (key_val.type, key_val.value)
-                    if not isinstance(current.value, Map):
-                        raise ASMRuntimeError("Attempted map-indexing into non-map value", location=expression.location, rewrite_rule="INDEX")
-                    if key not in current.value.data:
-                        raise ASMRuntimeError(f"Key not found: {key_val.value}", location=expression.location, rewrite_rule="INDEX")
-                    current = current.value.data[key]
-                    if idx + 1 < len(index_nodes):
-                        current = self._deref_value(current, location=expression.location, rule="INDEX")
-                return current
-
-            raise ASMRuntimeError("Indexed access requires a tensor or map", location=expression.location, rewrite_rule="INDEX")
-        if expression_type is Identifier:
+        if isinstance(expression, Identifier):
             found = env.get_optional(expression.name)
             if found is not None:
                 # Normal identifier access should follow pointer aliases.
@@ -5608,7 +5526,7 @@ class Interpreter:
                 location=expression.location,
                 rewrite_rule="IDENT",
             )
-        if expression_type is LambdaExpression:
+        if isinstance(expression, LambdaExpression):
             # Create an anonymous function value that closes over the current environment.
             self._lambda_counter += 1
             name = f"<lambda_{self._lambda_counter}>"
@@ -5629,12 +5547,12 @@ class Interpreter:
                 },
             )
             return Value(TYPE_FUNC, fn)
-        if expression_type.__name__ == "AsyncExpression":
+        if isinstance(expression, AsyncExpression):
             # Evaluate ASYNC as an expression: create a THR controller and return it.
-            block = expression.block  # type: ignore[attr-defined]
+            block = expression.block
             loc = expression.location
 
-            ctrl = {
+            ctrl_expr: Dict[str, Any] = {
                 "thread": None,
                 "paused": False,
                 "pause_event": threading.Event(),
@@ -5645,11 +5563,11 @@ class Interpreter:
                 "block": block,
             }
             # controller starts unpaused
-            ctrl["pause_event"].set()
+            ctrl_expr["pause_event"].set()
 
-            def _async_worker_expr():
+            def _async_worker_expr() -> None:
                 frame = self._new_frame("<async>", env, loc)
-                self._thread_ctrls[threading.get_ident()] = ctrl
+                self._thread_ctrls[threading.get_ident()] = ctrl_expr
                 self.call_stack.append(frame)
                 try:
                     self._emit_event("async_start", self, frame, env)
@@ -5675,21 +5593,21 @@ class Interpreter:
                         self._emit_event("async_end", self, frame, env)
                     except Exception:
                         pass
-                    ctrl["finished"] = True
-                    ctrl["state"] = "finished" if not ctrl.get("stop") else "stopped"
+                    ctrl_expr["finished"] = True
+                    ctrl_expr["state"] = "finished" if not ctrl_expr.get("stop") else "stopped"
 
             t = threading.Thread(target=_async_worker_expr, daemon=True, name=f"asm_async_{self.frame_counter}")
-            ctrl["thread"] = t
+            ctrl_expr["thread"] = t
             # Defer starting the worker thread until the enclosing call
             # completes. This avoids races where a builtin (e.g. PAUSE)
             # receives the THR and attempts to pause it only after the
             # worker has already begun executing.
-            ctrl["start_pending"] = True
-            self._pending_async_starts.append(ctrl)
-            return Value(TYPE_THR, ctrl)
-        if expression_type is CallExpression:
+            ctrl_expr["start_pending"] = True
+            self._pending_async_starts.append(ctrl_expr)
+            return Value(TYPE_THR, ctrl_expr)
+        if isinstance(expression, CallExpression):
             callee_expr = expression.callee
-            callee_ident = callee_expr.name if type(callee_expr) is Identifier else None
+            callee_ident = callee_expr.name if isinstance(callee_expr, Identifier) else None
 
             bound_func_value = env.get_optional(callee_ident) if callee_ident is not None else None
             resolved_function: Optional[Function] = None
@@ -5789,13 +5707,13 @@ class Interpreter:
                     if keyword_args:
                         if callee_ident in {"READFILE", "WRITEFILE"}:
                             allowed = {"coding"}
-                            key = "coding"
+                            kw_key = "coding"
                         elif callee_ident == "BYTES":
                             allowed = {"endian"}
-                            key = "endian"
+                            kw_key = "endian"
                         else:
                             allowed = set()
-                            key = None
+                            kw_key = None
 
                         unexpected = [k for k in keyword_args if k not in allowed]
                         if unexpected:
@@ -5804,8 +5722,8 @@ class Interpreter:
                                 location=expression.location,
                                 rewrite_rule=callee_ident,
                             )
-                        if key and key in keyword_args:
-                            positional_args.append(keyword_args.pop(key))
+                        if kw_key and kw_key in keyword_args:
+                            positional_args.append(keyword_args.pop(kw_key))
                         if keyword_args:
                             raise ASMRuntimeError(
                                 f"{callee_ident} does not accept keyword arguments",

@@ -7,12 +7,12 @@ import os
 from typing import List, Optional
 import threading
 
-from extensions import ASMExtensionError, ReplContext, load_runtime_services
+from extensions import ASMExtensionError, ReplContext, load_runtime_services, RuntimeServices
 from interpreter import ASMRuntimeError, Environment, ExitSignal, Interpreter, TracebackFormatter
 from lexer import ASMParseError, Lexer
 from parser import Parser, Statement
 
-import tkinter  # Ensure tkinter is available for GUI extensions
+import tkinter # needed for the gui extension (ext\gui.py) to work for the frozen executable
 
 def _print_error(msg: str) -> None:
     """Print an error message to stderr prefixed with U+0007 (BEL)."""
@@ -61,7 +61,7 @@ def _parse_statements_from_source(text: str, filename: str, *, type_names: Optio
     return program.statements
 
 
-def run_repl(*, verbose: bool, services) -> int:
+def run_repl(*, verbose: bool, services: Optional[RuntimeServices]) -> int:
     print("\x1b[38;2;153;221;255mASM-Lang\033[0m REPL. Enter statements, blank line to run buffer.") # "ASM-Lang" in light blue
     # Use "<repl>" as the REPL's effective source filename so that MAIN() and imports behave
     had_output = False
@@ -101,6 +101,7 @@ def run_repl(*, verbose: bool, services) -> int:
     picked = services.hook_registry.pick_repl() if services is not None else None
     if picked is not None:
         _name, runner, _ext = picked
+        assert services is not None
         ctx = ReplContext(
             verbose=verbose,
             services=services,
@@ -210,6 +211,7 @@ def run_repl(*, verbose: bool, services) -> int:
             continue
 
         buffer.append(line)
+    return 0
 
 
 def run_cli(argv: Optional[List[str]] = None) -> int:
@@ -272,7 +274,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     except BaseException as exc:
         return _print_internal_error(exc=exc, interpreter=None, verbose=bool(getattr(args, "verbose", False)))
 
-    program: Optional[str] = None
+    program = None
     if remaining:
         if len(remaining) > 1:
             _print_error("Too many non-extension inputs; expected a single program argument")
