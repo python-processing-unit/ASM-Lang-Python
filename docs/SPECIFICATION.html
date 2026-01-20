@@ -699,7 +699,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 
 - `VALUEIN(ANY: value, MAP: map):INT` - Returns `1` if any value stored in `map` is equal to `value` using the language's equality semantics, otherwise `0`.
 
-- `MATCH(MAP: map, MAP: template, INT: typing = 0):INT` - Returns `1` if every key in `template` is present in `map`. If `typing` is true, also require that for each matching key the stored value types are identical between `map` and `template`; otherwise return `0`.
+- `MATCH(MAP: map, MAP: template, INT: typing = 0, INT: recurse = 0, INT: shape = 0):INT` - Returns `1` if every key in `template` is present in `map`. If `typing` is true, also require that for each matching key the stored value types are identical between `map` and `template`. If `shape` is true, require that for any matching key where either side is a `TNS`, both sides are `TNS` and their shapes are identical. If `recurse` is true, apply these same rules to every `MAP` value nested anywhere within `map` (recursively). On any failure return `0`.
 
 - `INV(MAP: map):MAP` - Return a new map whose key/value pairs are reversed. Each value in `map` becomes a key in the returned map and each original key becomes the corresponding value. All values in `map` MUST be scalar (`INT`, `FLT`, or `STR`) so they can be used as keys; otherwise `INV` raises a runtime error. If `map` contains duplicate values (by key type and value), `INV` raises a runtime error.
 
@@ -725,9 +725,7 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 
 ### 12.9 Logarithms
 
-- `LOG(INT: a):INT` ; floor(log2(a)) for a > 0
-
-- `LOG(FLT: a):FLT` ; floor(log2(a)) for a > 0
+- `LOG(INT|FLT: a):INT|FLT` ; floor(log2(a)) for a > 0
 
 - `CLOG(INT: a):INT` ; ceil(log2(a)) for a > 0
 

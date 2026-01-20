@@ -536,7 +536,7 @@ class Builtins:
         self._register_custom("KEYS", 1, 1, self._keys)
         self._register_custom("VALUES", 1, 1, self._values)
         self._register_custom("KEYIN", 2, 2, self._keyin)
-        self._register_custom("MATCH", 2, 3, self._match)
+        self._register_custom("MATCH", 2, 5, self._match)
         self._register_custom("VALUEIN", 2, 2, self._valuein)
         self._register_custom("INV", 1, 1, self._inv)
         self._register_custom("EXPORT", 2, 2, self._export)
@@ -1271,17 +1271,21 @@ class Builtins:
         ___: Environment,
         location: SourceLocation,
     ) -> Value:
-        # MATCH(MAP: map, MAP: template, INT: typing = 0):INT
+        # MATCH(MAP: map, MAP: template, INT: typing = 0, INT: recurse = 0, INT: shape = 0):INT
         # Return 1 if every key in `template` is present in `map`.
         # If `typing` is true (non-zero), also require the types of the
         # associated values to match between the two maps.
-        if len(args) not in (2, 3):
-            raise ASMRuntimeError("MATCH requires two or three arguments", location=location, rewrite_rule="MATCH")
+        # If `recurse` is true, apply the same rules to every MAP value nested
+        # anywhere within `map` (recursively).
+        # If `shape` is true, require that any matching TNS values have identical
+        # shapes between `map` and `template`.
+        if len(args) not in (2, 3, 4, 5):
+            raise ASMRuntimeError("MATCH requires 2 to 5 arguments", location=location, rewrite_rule="MATCH")
         mval = args[0]
         tval = args[1]
-        typing_flag = Value(TYPE_INT, 0)
-        if len(args) == 3:
-            typing_flag = args[2]
+        typing_flag = args[2] if len(args) >= 3 else Value(TYPE_INT, 0)
+        recurse_flag = args[3] if len(args) >= 4 else Value(TYPE_INT, 0)
+        shape_flag = args[4] if len(args) >= 5 else Value(TYPE_INT, 0)
 
         if mval.type != TYPE_MAP:
             raise ASMRuntimeError("MATCH expects a MAP as first argument", location=location, rewrite_rule="MATCH")
@@ -1289,21 +1293,56 @@ class Builtins:
             raise ASMRuntimeError("MATCH expects a MAP as second argument", location=location, rewrite_rule="MATCH")
         if typing_flag.type != TYPE_INT:
             raise ASMRuntimeError("MATCH expects typing flag to be INT", location=location, rewrite_rule="MATCH")
+        if recurse_flag.type != TYPE_INT:
+            raise ASMRuntimeError("MATCH expects recurse flag to be INT", location=location, rewrite_rule="MATCH")
+        if shape_flag.type != TYPE_INT:
+            raise ASMRuntimeError("MATCH expects shape flag to be INT", location=location, rewrite_rule="MATCH")
 
         m = mval.value
         t = tval.value
         assert isinstance(m, Map) and isinstance(t, Map)
 
         require_typing = 0 if typing_flag.value == 0 else 1
+        require_recurse = 0 if recurse_flag.value == 0 else 1
+        require_shape = 0 if shape_flag.value == 0 else 1
 
-        for key in t.data.keys():
-            if key not in m.data:
-                return Value(TYPE_INT, 0)
-            if require_typing:
-                mv = m.data[key]
+        def _match_one(mm: Map) -> int:
+            for key in t.data.keys():
+                if key not in mm.data:
+                    return 0
+                mv = mm.data[key]
                 tv = t.data[key]
-                if mv.type != tv.type:
-                    return Value(TYPE_INT, 0)
+                if require_typing and mv.type != tv.type:
+                    return 0
+                if require_shape:
+                    if (mv.type == TYPE_TNS) or (tv.type == TYPE_TNS):
+                        if mv.type != TYPE_TNS or tv.type != TYPE_TNS:
+                            return 0
+                        mt = mv.value
+                        tt = tv.value
+                        if not isinstance(mt, Tensor) or not isinstance(tt, Tensor):
+                            return 0
+                        if mt.shape != tt.shape:
+                            return 0
+            return 1
+
+        if not require_recurse:
+            return Value(TYPE_INT, _match_one(m))
+
+        # Recurse into nested MAP values within `map`.
+        visited: set[int] = set()
+        stack: List[Map] = [m]
+        while stack:
+            mm = stack.pop()
+            mm_id = id(mm)
+            if mm_id in visited:
+                continue
+            visited.add(mm_id)
+            if _match_one(mm) == 0:
+                return Value(TYPE_INT, 0)
+            for v in mm.data.values():
+                if v.type == TYPE_MAP and isinstance(v.value, Map):
+                    stack.append(v.value)
 
         return Value(TYPE_INT, 1)
 
@@ -1370,7 +1409,7 @@ class Builtins:
         # BOOL(ANY: item):INT -> truthiness of item (INT: nonzero, STR: non-empty, TNS: any true element)
         return Value(TYPE_INT, 1 if self._as_bool_value(interpreter, args[0], loc) != 0 else 0)
 
-    def _eq(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, ___loc: SourceLocation) -> Value:
+    def _eq(self, interpreter: "Interpreter", args: List[Value], __: List[Expression], ___: Environment, location: SourceLocation) -> Value:
         a, b = args
         return Value(TYPE_INT, 1 if interpreter._values_equal(a, b) else 0)
 
@@ -1639,7 +1678,7 @@ class Builtins:
         args: List[Value],
         __: List[Expression],
         ___: Environment,
-        __loc: SourceLocation,
+        loc: SourceLocation,
     ) -> Value:
         # Return a short lowercase host OS family string as STR.
         plat = sys.platform.lower()

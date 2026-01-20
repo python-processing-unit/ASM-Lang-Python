@@ -306,6 +306,43 @@ FUNC BUILTIN_TESTS():INT{
     ASSERT( EQ( MATCH(mm2, tmpl3), 1 ) )
     MAP: tmpl4 = < "three" = 1 >
     ASSERT( EQ( MATCH(mm2, tmpl4), 0 ) )
+
+    # MATCH recurse flag: when true, apply same template rules to nested MAPs.
+    MAP: mmr_ok = < "one" = 1, "child" = < "one" = 1 > >
+    ASSERT( EQ( MATCH(mmr_ok, tmpl1, 0, 0), 1 ) )
+    ASSERT( EQ( MATCH(mmr_ok, tmpl1, 0, 1), 1 ) )
+    MAP: mmr_bad = < "one" = 1, "child" = < "two" = 10 > >
+    ASSERT( EQ( MATCH(mmr_bad, tmpl1, 0, 0), 1 ) )
+    ASSERT( EQ( MATCH(mmr_bad, tmpl1, 0, 1), 0 ) )
+    # recurse + typing: nested MAP must also satisfy typing constraint.
+    MAP: mmr_tbad = < "one" = 1, "child" = < "one" = "x" > >
+    ASSERT( EQ( MATCH(mmr_tbad, tmpl1, 1, 0), 1 ) )
+    ASSERT( EQ( MATCH(mmr_tbad, tmpl1, 1, 1), 0 ) )
+
+    # MATCH shape flag: when true, require matching TNS shapes.
+    TNS: s1 = [1, 10, 11]
+    TNS: s1b = [0, 0, 0]
+    TNS: s2 = [[1,10],[11,100]]
+    MAP: mshape_ok = < "t" = s1 >
+    MAP: tshape_ok = < "t" = s1b >
+    ASSERT( EQ( MATCH(mshape_ok, tshape_ok, 1, 0, 1), 1 ) )
+    MAP: tshape_bad = < "t" = s2 >
+    ASSERT( EQ( MATCH(mshape_ok, tshape_bad, 1, 0, 1), 0 ) )
+    # If shape is enabled and either side is a TNS, both must be TNS.
+    MAP: mshape_non = < "t" = 1 >
+    ASSERT( EQ( MATCH(mshape_non, tshape_ok, 0, 0, 0), 1 ) )
+    ASSERT( EQ( MATCH(mshape_non, tshape_ok, 0, 0, 1), 0 ) )
+
+    DEL(mmr_ok)
+    DEL(mmr_bad)
+    DEL(mmr_tbad)
+    DEL(s1)
+    DEL(s1b)
+    DEL(s2)
+    DEL(mshape_ok)
+    DEL(tshape_ok)
+    DEL(tshape_bad)
+    DEL(mshape_non)
     DEL(tmpl1)
     DEL(tmpl2)
     DEL(tmpl3)
