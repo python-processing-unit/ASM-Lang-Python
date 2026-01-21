@@ -7,6 +7,7 @@ IMPORT(image)
 IMPORT(gui)
 IMPORT(waveforms)
 IMPORT(stats)
+IMPORT(diff)
 
 FUNC BUILTIN_TESTS():INT{
     PRINT("Running built-in tests...")
@@ -1119,6 +1120,17 @@ FUNC STDLIB_TESTS():INT{
     } ELSE {
         PRINT("Skipping GUI tests on non-Windows host.")
     }
+
+    # diff library
+    STR: _d_a = "line1\nline2\nline3"
+    STR: _d_b = "line1\nlineX\nline3"
+    ASSERT( EQ( BOOL(diff.UNIFIED(_d_a, _d_b)), 1 ) )
+    ASSERT( EQ( BOOL(diff.CONTEXT(_d_a, _d_b)), 1 ) )
+    ASSERT( EQ( BOOL(diff.SIDE_BY_SIDE(_d_a, _d_b)), 1 ) )
+    DEL(_d_a)
+    DEL(_d_b)
+    PRINT("Diff extension tests passed.")
+
     PRINT("All standard library tests passed.\n")
     RETURN(0)
 }

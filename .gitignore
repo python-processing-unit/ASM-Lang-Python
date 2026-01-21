@@ -1,3 +1,5 @@
 # Ignore Python bytecode cache directories
 __pycache__/
 ext/__pycache__/
+# Ignore MyPy cache directory
+.mypy_cache/

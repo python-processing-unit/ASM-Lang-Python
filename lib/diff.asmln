@@ -1,0 +1,72 @@
+# diff utilities for ASM-Lang
+#
+# API:
+# UNIFIED(modified: STR, source: STR):STR
+# CONTEXT(modified: STR, source: STR):STR
+# SIDE_BY_SIDE(modified: STR, source: STR):STR
+
+FUNC _append_line(STR: acc, STR: line):STR{
+    IF( EQ(acc, "") ){ RETURN(line) } ELSE { RETURN( JOIN(acc, "\n", line) ) }
+}
+
+FUNC UNIFIED(STR: mod, STR: src):STR{
+    TNS: a = SPLIT(mod, "\n")
+    TNS: b = SPLIT(src, "\n")
+    INT: la = TLEN(a, 1)
+    INT: lb = TLEN(b, 1)
+    INT: n = MAX(la, lb)
+    STR: out = ""
+    INT: i = 1
+    WHILE( LTE(i, n) ){
+        STR: left = ""
+        IF( LTE(i, la) ){ left = a[i] }
+        STR: right = ""
+        IF( LTE(i, lb) ){ right = b[i] }
+
+        IF( EQ(left, right) ){
+            IF( NOT(EQ(left, "")) ){
+                STR: line = JOIN(" ", left)
+                out = _append_line(out, line)
+            }
+        } ELSE {
+            IF( NOT(EQ(left, "")) ){
+                out = _append_line(out, JOIN("-", left))
+            }
+            IF( NOT(EQ(right, "")) ){
+                out = _append_line(out, JOIN("+", right))
+            }
+        }
+        i = ADD(i, 1)
+    }
+    RETURN(out)
+}
+
+FUNC CONTEXT(STR: mod, STR: src):STR{
+    # For simplicity, use the same output as UNIFIED but with a ' ' prefix
+    STR: u = UNIFIED(mod, src)
+    IF( EQ(u, "") ){ RETURN("") }
+    # Prepend a simple header to resemble context diff
+    RETURN( JOIN("*** a", "\n", u) )
+}
+
+FUNC SIDE_BY_SIDE(STR: mod, STR: src):STR{
+    TNS: a = SPLIT(mod, "\n")
+    TNS: b = SPLIT(src, "\n")
+    INT: la = TLEN(a, 1)
+    INT: lb = TLEN(b, 1)
+    INT: n = MAX(la, lb)
+    STR: out = ""
+    INT: i = 1
+    WHILE( LTE(i, n) ){
+        STR: left = ""
+        IF( LTE(i, la) ){ left = a[i] }
+        STR: right = ""
+        IF( LTE(i, lb) ){ right = b[i] }
+        STR: marker = " "
+        IF( NOT(EQ(left, right)) ){ marker = "|" }
+        STR: line = JOIN(left, " ", marker, " ", right)
+        out = _append_line(out, line)
+        i = ADD(i, 1)
+    }
+    RETURN(out)
+}
