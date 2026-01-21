@@ -226,6 +226,8 @@ Thread values (`THR`): a `THR` value is a handle to a background task. In Boolea
 
 Assignments have the syntax `TYPE : identifier = expression` on first use, where TYPE is `INT`, `FLT`, `STR`, `TNS`, or `FUNC`. Spaces around the colon and equals sign are optional. Subsequent assignments to an existing identifier may omit the type but must preserve the original type. Variables are deallocated only when `DEL(identifier)` is executed.
 
+Inline assignment operator: the built-in `ASSIGN` provides an expression form of assignment, similar to a walrus operator. The general form is `ASSIGN(target, expression)` and it evaluates `expression`, assigns it to `target`, and returns the assigned value. The `target` may be a plain identifier (e.g. `ASSIGN(x, 1)`) or an indexed assignment target (e.g. `ASSIGN(tensor[1], 0)` or `ASSIGN(map<"k">, 1)`). If the identifier has not yet been declared, the typed form is required: `ASSIGN(TYPE: name, expression)` declares the identifier's type and performs the assignment in one step. The typed form is only valid for plain identifiers; indexed targets must already exist and follow the same indexed-assignment rules as statement assignments.
+
 Tensor elements can be reassigned with the indexed form `identifier[i1,...,iN] = expression`. The base must be a previously-declared `TNS` binding. The indices must match the tensor's dimensionality, follow the same one-based/negative-index rules as ordinary indexing, and must reference anexisting position. The element's original type cannot change: attempting to store a different type at that position is a runtime error. Indexed assignment mutates the `TNS`.
 
 The language provides `IF`, `ELSEIF`, and `ELSE` constructs for conditional execution. An `IF` statement has the general form `IF(condition){ block }`. Optional chained branches may follow: one or more `ELSEIF(condition){ block }` clauses and an optional terminal `ELSE{ block }` clause. An `ELSEIF` or `ELSE` must immediately follow an `IF` or another `ELSEIF`; otherwise it is a syntax error. At most one `ELSE` may appear in a given chain. Evaluation proceeds by first evaluating the condition of the initial `IF`. If it is non-zero, the associated block executes and the rest of the chain is skipped. Otherwise, the conditions of subsequent `ELSEIF` clauses are evaluated in order until one is non-zero; its block then executes and the chain terminates. If no `IF` or `ELSEIF` condition is satisfied and an `ELSE` is present, the `ELSE` block executes; if there is no `ELSE`, no block in the chain executes.
@@ -520,6 +522,8 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 
 - `DEL(SYMBOL: x)` ; delete variable `x` from environment
 
+- `ASSIGN(SYMBOL: target, ANY: value):ANY` — Evaluate `value`, assign it to `target`, and return the assigned value. `target` may be a plain identifier or an indexed target (`tensor[...]` or `map<...>`). If the identifier has not been declared, use the typed form `ASSIGN(TYPE: name, value)` to declare and assign in one step. The typed form is only valid for plain identifiers; indexed targets must already exist.
+
 - `EXIT()` or `EXIT(INT:code)` — Requests immediate termination of the interpreter. If an integer `code` is supplied, it is used as the interpreter's process exit code; otherwise `0` is used. Execution stops immediately when `EXIT` is executed (no further statements run), and an entry is recorded in the state log to make deterministic replay possible. Using `EXIT` inside a function terminates the entire program (not just the function).
 
 - `INT(STR: x):INT` ; `STR` -> `INT` using empty/01/other rules; `INT` passthrough
@@ -560,29 +564,28 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 
 ### 12.2 Arithmetic (`INT` or `FLT`, no mixing)
 
-- `ADD(INT|FLT: a, INT|FLT: b):INT|FLT` ; a + b
+- `ADD(INT|FLT: a, INT|FLT: b):INT|FLT` ; `a` + `b`
 
-- `SUB(INT|FLT: a, INT|FLT: b):INT|FLT` ; a - b
+- `SUB(INT|FLT: a, INT|FLT: b):INT|FLT` ; `a` - `b`
 
-- `MUL(INT|FLT: a, INT|FLT: b):INT|FLT` ; a * b
+- `MUL(INT|FLT: a, INT|FLT: b):INT|FLT` ; `a` * `b`
 
-- `DIV(INT|FLT: a, INT|FLT: b):INT|FLT` ; floor(a / b)
+- `DIV(INT|FLT: a, INT|FLT: b):INT|FLT` ; floor(`a` / `b`)
 
-- `CDIV(INT|FLT: a, INT|FLT: b):INT|FLT` ; ceil(a / b)
+- `CDIV(INT|FLT: a, INT|FLT: b):INT|FLT` ; ceil(`a` / `b`)
 
-- `POW(INT|FLT: a, INT|FLT: b):INT|FLT` ; a ^ b
+- `POW(INT|FLT: a, INT|FLT: b):INT|FLT` ; `a` ^ `b`
+- `ROOT(INT|FLT: x, INT|FLT: n):INT|FLT` ; `n`th root of `x`. No mixing of `INT` and `FLT` is allowed. For `INT` arguments `n` must be non-zero; positive `n` returns the integer nth root (largest integer r with r^n <= x for x >= 0); negative `n` yields an integer result only for `x` equal to `1` or `-1` (reciprocal is integer), and `x < 0` requires odd `n`. For `FLT` arguments the result is `x^(1/n)` (negative `n` allowed); negative `x` is allowed only when `n` is an odd integer. Division by zero is an error.
 
-- `ROOT(INT|FLT: x, INT|FLT: n):INT|FLT` ; nth root of `x`. No mixing of `INT` and `FLT` is allowed. For `INT` arguments `n` must be non-zero; positive `n` returns the integer nth root (largest integer r with r^n <= x for x >= 0); negative `n` yields an integer result only for `x` equal to `1` or `-1` (reciprocal is integer), and `x < 0` requires odd `n`. For `FLT` arguments the result is `x^(1/n)` (negative `n` allowed); negative `x` is allowed only when `n` is an odd integer. Division by zero is an error.
+- `MOD(INT|FLT: a, INT|FLT: b):INT|FLT` ; remainder of `a` / `b`
 
-- `MOD(INT|FLT: a, INT|FLT: b):INT|FLT` ; remainder of a / b
+- `NEG(INT|FLT: a):INT|FLT` ; -`a` (additive inverse)
 
-- `NEG(INT|FLT: a):INT|FLT` ; -a (additive inverse)
+- `ABS(INT|FLT: a):INT|FLT` ; absolute value of `a`
 
-- `ABS(INT|FLT: a):INT|FLT` ; absolute value of a
+- `GCD(INT|FLT: a, INT|FLT: b):INT|FLT` ; greatest common divisor of `a` and `b`
 
-- `GCD(INT|FLT: a, INT|FLT: b):INT|FLT` ; greatest common divisor of a and b
-
-- `LCM(INT|FLT: a, INT|FLT: b):INT|FLT` ; least common multiple of a and b
+- `LCM(INT|FLT: a, INT|FLT: b):INT|FLT` ; least common multiple of `a` and `b`
 
 ### 12.3 Bitwise / Boolean
 
@@ -612,14 +615,15 @@ Tensor indexing uses the expression form `tensor[i1, i2, ..., iN]`. The number o
 
 ### 12.4 Comparisons
 
-- `EQ(ANY: a, ANY: b):INT` ; 1 if a == b else 0
+- `EQ(ANY: a, ANY: b):INT` ; 1 if `a` == `b` else 0
 
-- `GT(INT|FLT: a, INT|FLT: b):INT` ; 1 if a > b else 0 (no mixing `INT`/`FLT`)
+- `GT(INT|FLT: a, INT|FLT: b):INT` ; 1 if `a` > `b` else 0 (no mixing `INT`/`FLT`)
 
-- `LT(INT|FLT: a, INT|FLT: b):INT` ; 1 if a < b else 0 (no mixing `INT`/`FLT`)
+- `LT(INT|FLT: a, INT|FLT: b):INT` ; 1 if `a` < `b` else 0 (no mixing `INT`/`FLT`)
 
-- `GTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if a >= b else 0 (no mixing `INT`/`FLT`)
-- `LTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if a <= b else 0 (no mixing `INT`/`FLT`)
+- `GTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if `a` >= `b` else 0 (no mixing `INT`/`FLT`)
+
+- `LTE(INT|FLT: a, INT|FLT: b):INT` ; 1 if `a` <= `b` else 0 (no mixing `INT`/`FLT`)
 
 ### 12.5 Aggregates / Utilities
 

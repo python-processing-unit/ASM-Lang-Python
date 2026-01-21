@@ -220,6 +220,12 @@ class PointerExpression(Expression):
 
 
 @dataclass(slots=True)
+class TypedTarget(Expression):
+    declared_type: str
+    target: Expression
+
+
+@dataclass(slots=True)
 class CallExpression(Expression):
     callee: Expression
     args: List["CallArgument"]
@@ -637,20 +643,43 @@ class Parser:
         args: List[CallArgument] = []
         seen_kw = False
         if self._peek().type != "RPAREN":
+            arg_index = 0
             while True:
-                if self._peek().type == "IDENT" and self._peek_next().type == "EQUALS":
-                    name_tok = self._consume("IDENT")
-                    self._consume("EQUALS")
-                    arg_expr = self._parse_expression()
-                    seen_kw = True
-                    args.append(CallArgument(name=name_tok.value, expression=arg_expr))
+                if isinstance(callee, Identifier) and callee.name == "ASSIGN" and arg_index == 0:
+                    # ASSIGN allows a typed target in its first argument: ASSIGN(INT: x, expr)
+                    if self._peek().value in self.type_names and self._peek_next().type == "COLON":
+                        type_tok = self._consume_type_token()
+                        self._consume("COLON")
+                        if self._peek().type != "IDENT":
+                            raise ASMParseError(f"ASSIGN typed target must be an identifier at line {self._peek().line}")
+                        ident_tok = self._consume("IDENT")
+                        ident_expr = Identifier(location=self._location_from_token(ident_tok), name=ident_tok.value)
+                        typed_expr = TypedTarget(
+                            location=self._location_from_token(type_tok),
+                            declared_type=type_tok.value,
+                            target=ident_expr,
+                        )
+                        args.append(CallArgument(name=None, expression=typed_expr))
+                    else:
+                        arg_expr = self._parse_expression()
+                        if not isinstance(arg_expr, (Identifier, IndexExpression)):
+                            raise ASMParseError(f"ASSIGN target must be identifier or indexed target at line {self._peek().line}")
+                        args.append(CallArgument(name=None, expression=arg_expr))
                 else:
-                    if seen_kw:
-                        raise ASMParseError(
-                            f"Positional argument cannot follow keyword argument at line {self._peek().line}")
-                    args.append(CallArgument(name=None, expression=self._parse_expression()))
+                    if self._peek().type == "IDENT" and self._peek_next().type == "EQUALS":
+                        name_tok = self._consume("IDENT")
+                        self._consume("EQUALS")
+                        arg_expr = self._parse_expression()
+                        seen_kw = True
+                        args.append(CallArgument(name=name_tok.value, expression=arg_expr))
+                    else:
+                        if seen_kw:
+                            raise ASMParseError(
+                                f"Positional argument cannot follow keyword argument at line {self._peek().line}")
+                        args.append(CallArgument(name=None, expression=self._parse_expression()))
                 if not self._match("COMMA"):
                     break
+                arg_index += 1
         self._consume("RPAREN")
         return CallExpression(location=self._location_from_token(lparen), callee=callee, args=args)
 

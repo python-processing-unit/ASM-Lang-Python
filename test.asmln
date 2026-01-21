@@ -134,6 +134,27 @@ FUNC BUILTIN_TESTS():INT{
     # assignment and deletion
     DEL(mm)
 
+    # --- ASSIGN operator ---
+    # Typed first assignment returns the assigned value
+    ASSERT( EQ( ASSIGN(INT: ax, 1), 1 ) )
+    ASSERT( EQ( ax, 1 ) )
+    # Untyped assignment allowed once type exists
+    ASSERT( EQ( ASSIGN(ax, 10), 10 ) )
+    ASSERT( EQ( ax, 10 ) )
+    DEL(ax)
+
+    # Indexed ASSIGN on tensor
+    TNS: at = [0, 0]
+    ASSERT( EQ( ASSIGN(at[1], 1), 1 ) )
+    ASSERT( EQ( at[1], 1 ) )
+    DEL(at)
+
+    # Indexed ASSIGN on map
+    MAP: am = < "k" = 0 >
+    ASSERT( EQ( ASSIGN(am<"k">, 1), 1 ) )
+    ASSERT( EQ( am<"k">, 1 ) )
+    DEL(am)
+
     # --- Pointer literal @ and simple aliasing ---
     # Pointer literals exist as expressions; avoid declaring unknown PTR type.
     INT: base = 1010

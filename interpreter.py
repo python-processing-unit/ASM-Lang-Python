@@ -56,6 +56,7 @@ from parser import (
     WhileStatement,
     ContinueStatement,
     TryStatement,
+    TypedTarget,
 )
 
 
@@ -526,6 +527,7 @@ class Builtins:
         self._register_custom("PRINT", 0, None, self._print)
         self._register_custom("ASSERT", 1, 1, self._assert)
         self._register_custom("THROW", 0, None, self._throw)
+        self._register_custom("ASSIGN", 2, 2, self._assign)
         self._register_custom("DEL", 1, 1, self._delete)
         self._register_custom("FREEZE", 1, 1, self._freeze)
         self._register_custom("THAW", 1, 1, self._thaw)
@@ -2309,6 +2311,63 @@ class Builtins:
             return Value(TYPE_INT, 0)
 
         raise ASMRuntimeError("DEL expects identifier or indexed target", location=location, rewrite_rule="DEL")
+
+    def _assign(
+        self,
+        interpreter: "Interpreter",
+        args: List[Value],
+        arg_nodes: List[Expression],
+        env: Environment,
+        location: SourceLocation,
+    ) -> Value:
+        if len(arg_nodes) != 2:
+            raise ASMRuntimeError("ASSIGN expects 2 arguments", location=location, rewrite_rule="ASSIGN")
+
+        target_node = arg_nodes[0]
+        declared_type: Optional[str] = None
+        if isinstance(target_node, TypedTarget):
+            declared_type = target_node.declared_type
+            target_node = target_node.target
+
+        if isinstance(target_node, Identifier):
+            name = target_node.name
+
+            def _name_exists_or_declared(name: str) -> bool:
+                cur: Optional[Environment] = env
+                while cur is not None:
+                    if name in cur.values or name in cur.declared:
+                        return True
+                    cur = cur.parent
+                return False
+
+            if declared_type is not None and "." in name and not _name_exists_or_declared(name):
+                raise ASMRuntimeError(
+                    f"Cannot create module-qualified name '{name}'",
+                    location=location,
+                    rewrite_rule="ASSIGN",
+                )
+            if name in interpreter.functions:
+                raise ASMRuntimeError(
+                    f"Identifier '{name}' already bound as function",
+                    location=location,
+                    rewrite_rule="ASSIGN",
+                )
+            value = interpreter._evaluate_expression(arg_nodes[1], env)
+            env.set(name, value, declared_type=declared_type)
+            return value
+
+        if isinstance(target_node, IndexExpression):
+            if declared_type is not None:
+                raise ASMRuntimeError(
+                    "ASSIGN type annotation is only valid for identifier targets",
+                    location=location,
+                    rewrite_rule="ASSIGN",
+                )
+            value = interpreter._evaluate_expression(arg_nodes[1], env)
+            interpreter._assign_index(target_node, value, env, location)
+            return value
+
+        raise ASMRuntimeError("ASSIGN target must be identifier or indexed target", location=location, rewrite_rule="ASSIGN")
 
     def _freeze(
         self,
@@ -4405,6 +4464,151 @@ class Interpreter:
             current = target_val
         return current
 
+    def _assign_index(self, target: IndexExpression, new_value: Value, env: Environment, location: SourceLocation) -> None:
+        base_expr, index_nodes, index_flags = self._gather_index_chain(target)
+        if type(base_expr) is not Identifier:
+            raise ASMRuntimeError(
+                "Indexed assignment requires identifier base",
+                location=location,
+                rewrite_rule="ASSIGN",
+            )
+
+        # Respect identifier freezing: element assignment is still a form of reassignment.
+        env_found = env._find_env(base_expr.name)
+        if env_found is not None and (base_expr.name in env_found.frozen or base_expr.name in env_found.permafrozen):
+            raise ASMRuntimeError(
+                f"Identifier '{base_expr.name}' is frozen and cannot be reassigned",
+                location=location,
+                rewrite_rule="ASSIGN",
+            )
+
+        base_val = self._evaluate_expression(base_expr, env)
+        base_val = self._deref_value(base_val, location=location, rule="ASSIGN")
+
+        # Support mixed indexing for assignment: navigate through tensor and map indices.
+        # Process indices in groups of the same type, navigating down to the final container
+        # before performing the assignment.
+
+        if not index_nodes:
+            raise ASMRuntimeError("Indexed assignment requires at least one index", location=location, rewrite_rule="ASSIGN")
+
+        current_val = base_val
+        i = 0
+
+        # Find where the last index group starts
+        last_group_start = 0
+        last_is_map = index_flags[-1]
+        for idx in range(len(index_flags) - 1, -1, -1):
+            if index_flags[idx] != last_is_map:
+                last_group_start = idx + 1
+                break
+
+        # Process all index groups except the last one
+        while i < last_group_start:
+            is_map = index_flags[i]
+            # Find the end of this group
+            j = i
+            while j < last_group_start and index_flags[j] == is_map:
+                j += 1
+
+            group_nodes = index_nodes[i:j]
+
+            if not is_map:
+                # Process tensor-style indices
+                if current_val.type != TYPE_TNS:
+                    raise ASMRuntimeError("Cannot use tensor-style '[...]' to index a non-tensor", location=location, rewrite_rule="ASSIGN")
+                current_val = self._index_tensor(current_val, group_nodes, env, location)
+            else:
+                # Process map-style indices
+                if current_val.type != TYPE_MAP:
+                    raise ASMRuntimeError("Cannot use map-style '<...>' to index a non-map", location=location, rewrite_rule="ASSIGN")
+                current_val = self._index_map(current_val, group_nodes, env, location)
+
+            i = j
+
+        # Now handle the last index group for assignment
+        last_indices = index_nodes[last_group_start:]
+
+        if last_is_map:
+            # Map assignment: traverse/create nested maps for all but the final key
+            if current_val.type != TYPE_MAP:
+                raise ASMRuntimeError("Cannot use map-style '<...>' to index a non-map", location=location, rewrite_rule="ASSIGN")
+            assert isinstance(current_val.value, Map)
+            eval_expr = self._evaluate_expression
+            current_map_val = current_val
+            for idx_node in last_indices[:-1]:
+                key_val = eval_expr(idx_node, env)
+                if key_val.type not in (TYPE_INT, TYPE_FLT, TYPE_STR):
+                    raise ASMRuntimeError("Map keys must be INT, FLT, or STR", location=location, rewrite_rule="ASSIGN")
+                key = (key_val.type, key_val.value)
+                # If key absent, create nested map
+                if key not in current_map_val.value.data:
+                    new_map = Map()
+                    current_map_val.value.data[key] = Value(TYPE_MAP, new_map)
+                next_val = current_map_val.value.data[key]
+                if next_val.type != TYPE_MAP:
+                    raise ASMRuntimeError("Cannot index into non-map value", location=location, rewrite_rule="ASSIGN")
+                current_map_val = next_val
+            # Final key
+            final_key_node = last_indices[-1]
+            final_key_val = eval_expr(final_key_node, env)
+            if final_key_val.type not in (TYPE_INT, TYPE_FLT, TYPE_STR):
+                raise ASMRuntimeError("Map keys must be INT, FLT, or STR", location=location, rewrite_rule="ASSIGN")
+            final_key = (final_key_val.type, final_key_val.value)
+            existing = current_map_val.value.data.get(final_key)
+            if existing is not None and existing.type != new_value.type:
+                raise ASMRuntimeError(
+                    f"Type mismatch for map key assignment: existing {existing.type} vs new {new_value.type}",
+                    location=location,
+                    rewrite_rule="ASSIGN",
+                )
+            current_map_val.value.data[final_key] = new_value
+            return
+
+        # Tensor assignment
+        if current_val.type != TYPE_TNS:
+            raise ASMRuntimeError("Cannot use tensor-style '[...]' to index a non-tensor", location=location, rewrite_rule="ASSIGN")
+        assert isinstance(current_val.value, Tensor)
+        eval_expr = self._evaluate_expression
+        expect_int = self._expect_int
+        RangeT = Range
+        StarT = Star
+        has_range = any((type(n) is RangeT) or (type(n) is StarT) for n in last_indices)
+        if not has_range:
+            indices: List[int] = []
+            indices_append = indices.append
+            for node in last_indices:
+                indices_append(expect_int(eval_expr(node, env), "ASSIGN", location))
+            self._mutate_tensor_value(current_val.value, indices, new_value, location)
+            return
+
+        # Slice assignment path
+        arr = current_val.value.data.reshape(tuple(current_val.value.shape))
+        indexers: List[object] = []
+        for dim, node in enumerate(last_indices):
+            if isinstance(node, Range):
+                lo_val = expect_int(eval_expr(node.lo, env), "ASSIGN", location)
+                hi_val = expect_int(eval_expr(node.hi, env), "ASSIGN", location)
+                lo_res = self._resolve_tensor_index(lo_val, current_val.value.shape[dim], "ASSIGN", location)
+                hi_res = self._resolve_tensor_index(hi_val, current_val.value.shape[dim], "ASSIGN", location)
+                indexers.append(slice(lo_res - 1, hi_res))
+            elif isinstance(node, Star):
+                indexers.append(slice(None, None))
+            else:
+                raw = expect_int(eval_expr(node, env), "ASSIGN", location)
+                idx_res = self._resolve_tensor_index(raw, current_val.value.shape[dim], "ASSIGN", location)
+                indexers.append(idx_res - 1)
+
+        if new_value.type != TYPE_TNS:
+            raise ASMRuntimeError("Slice assignment requires tensor RHS", location=location, rewrite_rule="ASSIGN")
+        assert isinstance(new_value.value, Tensor)
+        rhs_arr = new_value.value.data.reshape(tuple(new_value.value.shape))
+        try:
+            arr[cast(Any, tuple(indexers))] = rhs_arr
+        except (ValueError, IndexError, RuntimeError) as exc:
+            raise ASMRuntimeError(f"Slice assignment failed: {exc}", location=location, rewrite_rule="ASSIGN")
+        return
+
     def _assign_pointer_target(
         self, ptr: PointerRef, new_value: Value, *, location: Optional[SourceLocation], rule: str
     ) -> None:
@@ -4622,156 +4826,9 @@ class Interpreter:
             env.set(statement.target, value, declared_type=statement.declared_type)
             return
         if isinstance(statement, TensorSetStatement):
-            base_expr, index_nodes, index_flags = self._gather_index_chain(statement.target)
-            if type(base_expr) is not Identifier:
-                raise ASMRuntimeError(
-                    "Indexed assignment requires identifier base",
-                    location=statement.location,
-                    rewrite_rule="ASSIGN",
-                )
-
-            # Respect identifier freezing: element assignment is still a form of reassignment.
-            env_found = env._find_env(base_expr.name)
-            if env_found is not None and (base_expr.name in env_found.frozen or base_expr.name in env_found.permafrozen):
-                raise ASMRuntimeError(
-                    f"Identifier '{base_expr.name}' is frozen and cannot be reassigned",
-                    location=statement.location,
-                    rewrite_rule="ASSIGN",
-                )
-
-            base_val = self._evaluate_expression(base_expr, env)
-            base_val = self._deref_value(base_val, location=statement.location, rule="ASSIGN")
-            
-            # Support mixed indexing for assignment: navigate through tensor and map indices.
-            # Process indices in groups of the same type, navigating down to the final container
-            # before performing the assignment.
-            
-            # If we have no indices, this is not a valid TensorSetStatement
-            if not index_nodes:
-                raise ASMRuntimeError("Indexed assignment requires at least one index", location=statement.location, rewrite_rule="ASSIGN")
-            
-            # Navigate through all but the last index to get to the container
-            current_val = base_val
-            i = 0
-            
-            # Find where the last index group starts
-            last_group_start = 0
-            last_is_map = index_flags[-1]
-            for idx in range(len(index_flags) - 1, -1, -1):
-                if index_flags[idx] != last_is_map:
-                    last_group_start = idx + 1
-                    break
-            
-            # Process all index groups except the last one
-            while i < last_group_start:
-                is_map = index_flags[i]
-                # Find the end of this group
-                j = i
-                while j < last_group_start and index_flags[j] == is_map:
-                    j += 1
-                
-                group_nodes = index_nodes[i:j]
-                
-                if not is_map:
-                    # Process tensor-style indices
-                    if current_val.type != TYPE_TNS:
-                        raise ASMRuntimeError("Cannot use tensor-style '[...]' to index a non-tensor", location=statement.location, rewrite_rule="ASSIGN")
-                    current_val = self._index_tensor(current_val, group_nodes, env, statement.location)
-                else:
-                    # Process map-style indices
-                    if current_val.type != TYPE_MAP:
-                        raise ASMRuntimeError("Cannot use map-style '<...>' to index a non-map", location=statement.location, rewrite_rule="ASSIGN")
-                    current_val = self._index_map(current_val, group_nodes, env, statement.location)
-                
-                i = j
-            
-            # Now handle the last index group for assignment
-            last_indices = index_nodes[last_group_start:]
             new_value = self._evaluate_expression(statement.value, env)
-            
-            if last_is_map:
-                # Map assignment: traverse/create nested maps for all but the final key
-                if current_val.type != TYPE_MAP:
-                    raise ASMRuntimeError("Cannot use map-style '<...>' to index a non-map", location=statement.location, rewrite_rule="ASSIGN")
-                assert isinstance(current_val.value, Map)
-                eval_expr = self._evaluate_expression
-                current_map_val = current_val
-                for idx_node in last_indices[:-1]:
-                    key_val = eval_expr(idx_node, env)
-                    if key_val.type not in (TYPE_INT, TYPE_FLT, TYPE_STR):
-                        raise ASMRuntimeError("Map keys must be INT, FLT, or STR", location=statement.location, rewrite_rule="ASSIGN")
-                    key = (key_val.type, key_val.value)
-                    # If key absent, create nested map
-                    if key not in current_map_val.value.data:
-                        new_map = Map()
-                        current_map_val.value.data[key] = Value(TYPE_MAP, new_map)
-                    next_val = current_map_val.value.data[key]
-                    if next_val.type != TYPE_MAP:
-                        raise ASMRuntimeError("Cannot index into non-map value", location=statement.location, rewrite_rule="ASSIGN")
-                    current_map_val = next_val
-                # Final key
-                final_key_node = last_indices[-1]
-                final_key_val = eval_expr(final_key_node, env)
-                if final_key_val.type not in (TYPE_INT, TYPE_FLT, TYPE_STR):
-                    raise ASMRuntimeError("Map keys must be INT, FLT, or STR", location=statement.location, rewrite_rule="ASSIGN")
-                final_key = (final_key_val.type, final_key_val.value)
-                existing = current_map_val.value.data.get(final_key)
-                if existing is not None and existing.type != new_value.type:
-                    raise ASMRuntimeError(
-                        f"Type mismatch for map key assignment: existing {existing.type} vs new {new_value.type}",
-                        location=statement.location,
-                        rewrite_rule="ASSIGN",
-                    )
-                current_map_val.value.data[final_key] = new_value
-                return
-            else:
-                # Tensor assignment
-                if current_val.type != TYPE_TNS:
-                    raise ASMRuntimeError("Cannot use tensor-style '[...]' to index a non-tensor", location=statement.location, rewrite_rule="ASSIGN")
-                assert isinstance(current_val.value, Tensor)
-                eval_expr = self._evaluate_expression
-                expect_int = self._expect_int
-                # Check if any index is a Range (slice). If none, mutate a single element.
-                RangeT = Range
-                StarT = Star
-                has_range = any((type(n) is RangeT) or (type(n) is StarT) for n in last_indices)
-                if not has_range:
-                    indices: List[int] = []
-                    indices_append = indices.append
-                    for node in last_indices:
-                        indices_append(expect_int(eval_expr(node, env), "ASSIGN", statement.location))
-                    self._mutate_tensor_value(current_val.value, indices, new_value, statement.location)
-                    return
-                
-                # Slice assignment path
-                arr = current_val.value.data.reshape(tuple(current_val.value.shape))
-                indexers: List[object] = []
-                for dim, node in enumerate(last_indices):
-                    if isinstance(node, Range):
-                        lo_val = expect_int(eval_expr(node.lo, env), "ASSIGN", statement.location)
-                        hi_val = expect_int(eval_expr(node.hi, env), "ASSIGN", statement.location)
-                        lo_res = self._resolve_tensor_index(lo_val, current_val.value.shape[dim], "ASSIGN", statement.location)
-                        hi_res = self._resolve_tensor_index(hi_val, current_val.value.shape[dim], "ASSIGN", statement.location)
-                        indexers.append(slice(lo_res - 1, hi_res))
-                    elif isinstance(node, Star):
-                        indexers.append(slice(None, None))
-                    else:
-                        raw = expect_int(eval_expr(node, env), "ASSIGN", statement.location)
-                        idx_res = self._resolve_tensor_index(raw, current_val.value.shape[dim], "ASSIGN", statement.location)
-                        indexers.append(idx_res - 1)
-                
-                # Evaluate RHS and ensure it is a tensor
-                if new_value.type != TYPE_TNS:
-                    raise ASMRuntimeError("Slice assignment requires tensor RHS", location=statement.location, rewrite_rule="ASSIGN")
-                assert isinstance(new_value.value, Tensor)
-                # Perform the slice assignment
-                rhs_arr = new_value.value.data.reshape(tuple(new_value.value.shape))
-                try:
-                    arr[cast(Any, tuple(indexers))] = rhs_arr
-                except (ValueError, IndexError, RuntimeError) as exc:
-                    raise ASMRuntimeError(f"Slice assignment failed: {exc}", location=statement.location, rewrite_rule="ASSIGN")
-                # The assignment mutated the view; no need to reassign
-                return
+            self._assign_index(statement.target, new_value, env, statement.location)
+            return
         if isinstance(statement, ExpressionStatement):
             self._evaluate_expression(statement.expression, env)
             return
@@ -5491,6 +5548,8 @@ class Interpreter:
                 val = eval_expr(val_node, env)
                 m.data[key] = val
             return Value(TYPE_MAP, m)
+        if isinstance(expression, TypedTarget):
+            raise ASMRuntimeError("Typed target is only valid in ASSIGN", location=expression.location, rewrite_rule="ASSIGN")
         if isinstance(expression, PointerExpression):
             return self._make_pointer_value(expression.target, env, expression.location)
         if isinstance(expression, IndexExpression):
@@ -5689,6 +5748,34 @@ class Interpreter:
                     raise
                 self._emit_event("after_call", self, "IMPORT", result, env, expression.location)
                 self._log_step(rule="IMPORT", location=expression.location, extra={"module": module_label, "result": result.value})
+                return result
+
+            if resolved_function is None and callee_ident == "ASSIGN":
+                if any(arg.name for arg in expression.args):
+                    raise ASMRuntimeError(
+                        "ASSIGN does not accept keyword arguments",
+                        location=expression.location,
+                        rewrite_rule="ASSIGN",
+                    )
+                dummy_args = [Value(TYPE_INT, 0)] * len(expression.args)
+                arg_nodes = [arg.expression for arg in expression.args]
+                try:
+                    self._emit_event("before_call", self, "ASSIGN", [], env, expression.location)
+                    builtin = self.builtins.table.get("ASSIGN")
+                    if builtin is None:
+                        raise ASMRuntimeError("Unknown function 'ASSIGN'", location=expression.location)
+                    supplied = len(dummy_args)
+                    if supplied < builtin.min_args:
+                        raise ASMRuntimeError(f"ASSIGN expects at least {builtin.min_args} arguments", rewrite_rule="ASSIGN", location=expression.location)
+                    if builtin.max_args is not None and supplied > builtin.max_args:
+                        raise ASMRuntimeError(f"ASSIGN expects at most {builtin.max_args} arguments", rewrite_rule="ASSIGN", location=expression.location)
+                    result = builtin.impl(self, dummy_args, arg_nodes, env, expression.location)
+                    self._flush_pending_async_starts()
+                except ASMRuntimeError:
+                    self._log_step(rule="ASSIGN", location=expression.location, extra={"args": None, "status": "error"})
+                    raise
+                self._emit_event("after_call", self, "ASSIGN", result, env, expression.location)
+                self._log_step(rule="ASSIGN", location=expression.location, extra={"args": None, "result": result.value})
                 return result
 
             if resolved_function is None and callee_ident in ("DEL", "EXIST"):
