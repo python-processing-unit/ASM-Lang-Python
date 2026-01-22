@@ -48,6 +48,6 @@ jobs:
 
       - name: Run mypy on selected files
         run: |
-          Write-Host "Running mypy on: .\asm-lang.py .\ext\gui.py .\ext\image.py .\ext\networking.py .\ext\win32.py"
-          python -m mypy --show-error-codes .\asm-lang.py .\ext\gui.py .\ext\image.py .\ext\networking.py .\ext\win32.py
+          Write-Host "Running mypy on: .\asm-lang.py .\ext\networking.py .\ext\win32.py .\lib\gui\gui.py .\lib\image\image.py"
+          python -m mypy --show-error-codes .\asm-lang.py .\ext\networking.py .\ext\win32.py .\lib\gui\gui.py .\lib\image\image.py
         shell: pwsh
