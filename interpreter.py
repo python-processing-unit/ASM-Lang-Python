@@ -1707,6 +1707,121 @@ class Builtins:
                 fam = "unix"
         return Value(TYPE_STR, fam)
 
+    def _resolve_module_path(
+        self,
+        module_name: str,
+        base_dir: str,
+        location: SourceLocation,
+    ) -> Tuple[str, str]:
+        """Resolve a module name to a filesystem path.
+        
+        Supports package notation using '..' as the package separator:
+        - IMPORT(pkg) -> looks for pkg/init.asmln first, then pkg.asmln
+        - IMPORT(pkg..mod) -> looks for pkg/mod.asmln
+        - IMPORT(pkg..sub..mod) -> looks for pkg/sub/mod.asmln
+        
+        When a package and module with the same name exist at the same location,
+        the package is preferred.
+        
+        Returns a tuple of (resolved_path, source_text).
+        Raises ASMRuntimeError if the module cannot be found.
+        """
+        interpreter_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        lib_dir = os.path.join(interpreter_dir, "lib")
+        
+        # Parse the module name for package structure
+        # '..' is the package separator
+        if ".." in module_name:
+            # Package-qualified import: pkg..mod or pkg..sub..mod
+            parts = module_name.split("..")
+            # Build the path: pkg/sub/mod.asmln
+            relative_path = os.path.join(*parts[:-1], f"{parts[-1]}.asmln")
+        else:
+            # Simple module name - could be a module or a package
+            # First try as a package: look for pkg/init.asmln
+            pkg_init_path = os.path.join(base_dir, module_name, "init.asmln")
+            lib_pkg_init_path = os.path.join(lib_dir, module_name, "init.asmln")
+            
+            # Check for package in base_dir
+            if os.path.isdir(os.path.join(base_dir, module_name)):
+                if os.path.exists(pkg_init_path):
+                    try:
+                        with open(pkg_init_path, "r", encoding="utf-8") as handle:
+                            return pkg_init_path, handle.read()
+                    except OSError:
+                        pass
+                else:
+                    raise ASMRuntimeError(
+                        f"Package '{module_name}' exists but has no init.asmln",
+                        location=location,
+                        rewrite_rule="IMPORT"
+                    )
+            
+            # Check for package in lib_dir
+            if os.path.isdir(os.path.join(lib_dir, module_name)):
+                if os.path.exists(lib_pkg_init_path):
+                    try:
+                        with open(lib_pkg_init_path, "r", encoding="utf-8") as handle:
+                            return lib_pkg_init_path, handle.read()
+                    except OSError:
+                        pass
+                else:
+                    raise ASMRuntimeError(
+                        f"Package '{module_name}' exists but has no init.asmln",
+                        location=location,
+                        rewrite_rule="IMPORT"
+                    )
+            
+            # Fall back to module file: pkg.asmln
+            relative_path = f"{module_name}.asmln"
+        
+        # Try base_dir first
+        candidate = os.path.join(base_dir, relative_path)
+        if os.path.exists(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    return candidate, handle.read()
+            except OSError:
+                pass
+        
+        # Try lib_dir
+        lib_candidate = os.path.join(lib_dir, relative_path)
+        if os.path.exists(lib_candidate):
+            try:
+                with open(lib_candidate, "r", encoding="utf-8") as handle:
+                    return lib_candidate, handle.read()
+            except OSError:
+                pass
+        
+        raise ASMRuntimeError(
+            f"Failed to import '{module_name}': module not found",
+            location=location,
+            rewrite_rule="IMPORT"
+        )
+
+    def _split_module_name(self, fn_name: str, module_name: str) -> str:
+        """Split a function name from its module prefix.
+        
+        For package-qualified modules (using '..'), we need to handle
+        the separator properly.
+        """
+        # Module name may contain package separators ('..'). Regardless,
+        # function/symbol names are joined to the module using a single
+        # dot. Strip the module+dot prefix if present.
+        prefix = module_name + "."
+        if fn_name.startswith(prefix):
+            return fn_name[len(prefix):]
+        return fn_name
+
+    def _qualify_name(self, base: str, name: str) -> str:
+        """Create a qualified name by joining base and name.
+        
+        Uses '..' for package-qualified modules, '.' for simple modules.
+        """
+        # Always use a single dot to separate a module (which may itself
+        # contain package '..' separators) from the symbol name.
+        return f"{base}.{name}"
+
     def _import(
         self,
         interpreter: "Interpreter",
@@ -1727,6 +1842,12 @@ class Builtins:
             export_prefix = arg_nodes[1].name
         else:
             export_prefix = module_name
+        
+        # Use '.' to join a module name to its symbols; '..' remains
+        # the package separator inside module names for filesystem layout.
+        name_sep = "."
+        export_sep = "."
+        
         # If module was already imported earlier in this interpreter instance,
         # reuse the same Environment and function objects so all importers
         # observe the same namespace/instance.
@@ -1741,7 +1862,7 @@ class Builtins:
                     # fn.name is module_name.func; produce alias.func
                     if "." in fn.name:
                         unqualified = fn.name.split(".", 1)[1]
-                        alias_name = f"{export_prefix}.{unqualified}"
+                        alias_name = f"{export_prefix}{export_sep}{unqualified}"
                         if alias_name not in interpreter.functions:
                             created = Function(
                                 name=alias_name,
@@ -1753,7 +1874,7 @@ class Builtins:
                             interpreter.functions[alias_name] = created
 
             for k, v in cached_env.values.items():
-                dotted = f"{export_prefix}.{k}"
+                dotted = f"{export_prefix}{export_sep}{k}"
                 env.set(dotted, v, declared_type=v.type)
 
             if set(interpreter.functions.keys()) != pre_function_keys:
@@ -1761,20 +1882,16 @@ class Builtins:
             return Value(TYPE_INT, 0)
 
         base_dir = os.getcwd() if location.file == "<repl>" else os.path.dirname(os.path.abspath(location.file))
-        module_path = os.path.join(base_dir, f"{module_name}.asmln")
-
-        try:
-            with open(module_path, "r", encoding="utf-8") as handle:
-                source_text = handle.read()
-        except OSError as exc:
-            interpreter_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-            lib_module_path = os.path.join(interpreter_dir, "lib", f"{module_name}.asmln")
-            try:
-                with open(lib_module_path, "r", encoding="utf-8") as handle:
-                    source_text = handle.read()
-                    module_path = lib_module_path
-            except OSError:
-                raise ASMRuntimeError(f"Failed to import '{module_name}': {exc}", location=location, rewrite_rule="IMPORT")
+        
+        # Use package-aware module resolution
+        module_path, source_text = self._resolve_module_path(module_name, base_dir, location)
+        
+        # For extension loading, get the base name of the actual module file
+        # (handles package..module -> module.py extension lookup)
+        if ".." in module_name:
+            ext_module_name = module_name.split("..")[-1]
+        else:
+            ext_module_name = module_name
 
         # --- IMPORT-time extension loading ---
         # When importing a module, attempt to load any companion extensions so
@@ -1820,7 +1937,7 @@ class Builtins:
                     raise ASMExtensionError(f"Failed to load extensions from {companion_asmxt}: {exc}") from exc
 
             # Next, check for a single-file built-in extension named <module>.py
-            builtin = _extmod._resolve_in_builtin_ext(f"{module_name}.py")
+            builtin = _extmod._resolve_in_builtin_ext(f"{ext_module_name}.py")
             if builtin is not None and os.path.exists(builtin):
                 mod = _extmod.load_extension_module(builtin)
                 api_version = getattr(mod, "ASM_LANG_EXTENSION_API_VERSION", _extmod.EXTENSION_API_VERSION)
@@ -1875,7 +1992,7 @@ class Builtins:
         new_funcs = {n: f for n, f in interpreter.functions.items() if n not in prev_functions}
         registered_functions: List[Function] = []
         for name, fn in new_funcs.items():
-            dotted_name = f"{module_name}.{name}"
+            dotted_name = f"{module_name}{name_sep}{name}"
             if "." in name:
                 created = Function(
                     name=dotted_name,
@@ -1906,7 +2023,7 @@ class Builtins:
             for fn in registered_functions:
                 if "." in fn.name:
                     unqualified = fn.name.split(".", 1)[1]
-                    alias_name = f"{export_prefix}.{unqualified}"
+                    alias_name = f"{export_prefix}{export_sep}{unqualified}"
                     if alias_name not in interpreter.functions:
                         alias_fn = Function(
                             name=alias_name,
@@ -1926,7 +2043,7 @@ class Builtins:
 
         # Export top-level bindings from the module under the dotted namespace
         for k, v in module_env.values.items():
-            dotted = f"{module_name}.{k}"
+            dotted = f"{module_name}{name_sep}{k}"
             env.set(dotted, v, declared_type=v.type)
         return Value(TYPE_INT, 0)
 
