@@ -1,3 +1,5 @@
+**WARNING:** The Python implementation of Prefix is deprecated. Developers should focus on bringing the [C implementation of Prefix](https://github.com/python-processing-unit/Prefix-C) to full specification compatability.
+
 ## Installation
 <code>Invoke-WebRequest -Uri "https://github.com/python-processing-unit/Prefix/archive/refs/heads/main.zip" -OutFile "path\to\download\Prefix.zip"<br>
 Expand-Archive -Path "path\to\download\Prefix.zip" -DestinationPath "path\to\extract\Prefix"<br>
